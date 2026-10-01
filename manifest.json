@@ -6,12 +6,12 @@
   "author": "GigaSolo",
   "license": "MIT",
   "homepage": "https://github.com/gigasolo/gigameeting",
-  "description": "Join the meeting that is happening now, or starting within 15 minutes, record it under that name, and run your Meeting Recorder action when the transcript is ready.",
+  "description": "Requires Meeting Recorder. Join the meeting that is happening now, or starting within 15 minutes, record it under that name, and run an action when the transcript is ready.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "Widget.qml" },
   "barWidget": {
     "displayName": "GigaMeeting",
-    "description": "Join the current meeting and record it",
+    "description": "Requires Meeting Recorder. Join the current meeting and record it",
     "category": "Audio",
     "allowMultiple": false,
     "defaultSection": "right"

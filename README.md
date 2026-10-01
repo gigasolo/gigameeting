@@ -1,14 +1,38 @@
 # GigaMeeting
 
-GigaMeeting is a bar card for [Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder). Click the icon to open the card. Record, pause, and stop live there. The icon click does not start a recording.
+<p align="center">
+  <img src="preview.png" alt="GigaMeeting card. Ready, 00:00, meters quiet, Record lit." width="420">
+</p>
 
-When a timed event is happening, or starts within 15 minutes, the card offers to join it and record it under that name. The time comes from OmaCal. All-day events are skipped. If nothing is due, the card stays Ready.
+<p align="center">
+  <strong>The meeting on your calendar, from the bar.</strong><br>
+  Join it, record it under that name, and run your action when the transcript is ready.
+</p>
 
-After a take this card watched finishes, the transcript can be sent through the actions in Meeting Recorder. One action is the button. The chevron lists the others and can set the default. Nothing runs by itself.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/omarchy-bar-0ea5e9?style=flat-square" alt="Omarchy bar">
+  <img src="https://img.shields.io/badge/version-1.0.1-111827?style=flat-square" alt="Version 1.0.1">
+</p>
+
+GigaMeeting is a bar card. It does not record, and it does not transcribe.
+
+> [!IMPORTANT]
+> Install **[Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder)** before this plugin. Meeting Recorder is the app that records your microphone and the computer audio and writes the transcript on this computer. Open it from the launcher and confirm the name **Meeting Recorder**. Without that app, the card has nothing to start.
 
 An independent [MIT](LICENSE)-licensed plugin by [GigaSolo](https://github.com/gigasolo) for [Omarchy](https://omarchy.org/).
 
-## Install
+## Install Meeting Recorder
+
+```sh
+yay -S omarchy-meeting-recorder
+```
+
+That is the same install [Meeting Recorder documents](https://github.com/jankeesvw/omarchy-meeting-recorder#install). The package on disk is `omarchy-meeting-recorder-bin`. The first transcription downloads the speech model, about 1.6 GB, once.
+
+`omacal` is optional. It supplies the join offer. Without it, or with an empty calendar, the card stays on Record.
+
+## Install the card
 
 ```sh
 omarchy plugin add https://github.com/gigasolo/gigameeting.git
@@ -16,7 +40,32 @@ omarchy plugin add https://github.com/gigasolo/gigameeting.git
 
 Omarchy may ask which side of the bar to use. The default is the right.
 
-Plugins run as unsandboxed code inside `omarchy-shell`. Read the source before enabling a plugin you do not already trust.
+> [!IMPORTANT]
+> Plugins run as unsandboxed code inside `omarchy-shell`. Read the source before you enable a plugin you do not already trust.
+
+To review it before it appears on the bar:
+
+```sh
+omarchy plugin add https://github.com/gigasolo/gigameeting.git
+less ~/.config/omarchy/plugins/gigasolo.gigameeting/README.md
+omarchy plugin enable gigasolo.gigameeting --section right
+```
+
+## The card
+
+Click the icon to open the card. Click it again to close. The icon never starts a recording.
+
+| | |
+| --- | --- |
+| **Record** | Starts Meeting Recorder when it is ready. |
+| **Join and record** | A timed event is happening, or starts within 15 minutes. The recording takes the event's name. All-day events are skipped. |
+| **Pause** | Holds the take. Resume continues it. |
+| **Stop** | Saves the recording and transcribes it. |
+| **The action** | After a take this card watched finish, your Meeting Recorder action is the button. The chevron runs another action, or sets the default. Nothing runs by itself. |
+
+Actions are read from `~/.config/omarchy-meeting-recorder/config.toml` each time the card needs them. Meeting Recorder has no action editor. Change the file, and the next open picks it up.
+
+The default action is remembered in `~/.local/state/omarchy/gigameeting-default-action`.
 
 ## Remove
 
@@ -24,22 +73,11 @@ Plugins run as unsandboxed code inside `omarchy-shell`. Read the source before e
 omarchy plugin remove gigasolo.gigameeting
 ```
 
-Removal leaves `~/.local/state/omarchy/gigameeting-default-action` in place. That file is only the name of the default action. Delete it if you do not want the choice remembered.
+Removal leaves the default-action file in place. Delete `~/.local/state/omarchy/gigameeting-default-action` if you do not want that name kept. Removing the card does not remove Meeting Recorder.
 
-## Dependencies
-
-Required:
-
-- [omarchy-meeting-recorder](https://github.com/jankeesvw/omarchy-meeting-recorder)
-- `python3`
-- `xdg-open`
-- `timeout` (from coreutils)
-
-Optional:
-
-- `omacal`, for the join offer. Without it, or with an empty calendar database, the offer is absent and Record still works.
-
-Meeting Recorder actions are read from `~/.config/omarchy-meeting-recorder/config.toml` each time the card needs them.
+```sh
+sudo pacman -R omarchy-meeting-recorder-bin
+```
 
 ## Marketplace
 
