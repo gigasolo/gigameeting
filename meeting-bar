@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# GigaMeeting helper. Talks to omarchy-meeting-recorder and prints one
+# status line on stdout. Action names and errors from the recorder stay
+# available to the caller on the combined output.
+set -euo pipefail
+
+recorder=omarchy-meeting-recorder
+meetings="${HOME}/Documents/Meetings"
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-meeting-recorder"
+
+one_state() {
+  local line state
+  line=$(timeout 1.2 "$recorder" watch 2>/dev/null | head -n 1 || true)
+  if [[ $line != *'"state":"'* ]]; then
+    echo off
+    return
+  fi
+  state=${line#*'"state":"'}
+  state=${state%%'"'*}
+  case $state in
+    off|idle|recording|paused|stopping|transcribing|done) ;;
+    *) state=off ;;
+  esac
+  printf '%s\n' "$state"
+}
+
+has_unfinished() {
+  local dir bytes name
+  [[ -d $cache ]] || return 1
+  shopt -s nullglob
+  for dir in "$cache"/*; do
+    [[ -d $dir ]] || continue
+    for name in mic.raw system.raw; do
+      [[ -f $dir/$name ]] || continue
+      bytes=$(stat -c %s "$dir/$name" 2>/dev/null || echo 0)
+      if (( bytes > 0 )); then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+launch_recorder() {
+  if command -v uwsm-app >/dev/null 2>&1; then
+    setsid -f uwsm-app -- "$recorder" >/dev/null 2>&1
+  else
+    setsid -f "$recorder" >/dev/null 2>&1
+  fi
+}
+
+cmd_start() {
+  local state deadline name=${1:-}
+  name=${name//$'\n'/ }
+  name=${name//$'\r'/ }
+  state=$(one_state)
+  if [[ $state == off ]]; then
+    if has_unfinished; then
+      launch_recorder
+      echo recovery
+      return 0
+    fi
+    launch_recorder
+    deadline=$((SECONDS + 8))
+    while (( SECONDS < deadline )); do
+      state=$(one_state)
+      [[ $state == idle || $state == done || $state == recording || $state == paused ]] && break
+      sleep 0.4
+    done
+  fi
+  case $state in
+    recording|paused)
+      echo already
+      ;;
+    idle|done)
+      # `omarchy-meeting-recorder start "Meeting Name"`. No --name flag.
+      if [[ -n $name ]]; then
+        if "$recorder" start "$name" >/dev/null; then
+          echo started
+        else
+          echo "failed: the recorder is not running"
+          return 1
+        fi
+      elif "$recorder" start >/dev/null; then
+        echo started
+      else
+        echo "failed: the recorder is not running"
+        return 1
+      fi
+      ;;
+    *)
+      echo "failed: recorder is $state"
+      return 1
+      ;;
+  esac
+}
+
+cmd_open() {
+  local url=${1:-}
+  if [[ ! $url =~ ^https?:// ]]; then
+    echo "failed: not a meeting link"
+    return 1
+  fi
+  if xdg-open "$url" >/dev/null 2>&1; then
+    echo opened
+  else
+    echo "failed: could not open the meeting link"
+    return 1
+  fi
+}
+
+cmd_agenda() {
+  python3 - <<'PY'
+import json, subprocess, time
+
+def clock(value):
+    if not isinstance(value, str) or "T" not in value:
+        return ""
+    hhmm = value.split("T", 1)[1][:5]
+    return hhmm if len(hhmm) == 5 and hhmm[2] == ":" else ""
+
+try:
+    out = subprocess.run(
+        ["omacal", "agenda", "--days", "1", "--json"],
+        capture_output=True, text=True, timeout=10,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit(0)
+if out.returncode != 0 or not out.stdout.strip():
+    raise SystemExit(0)
+try:
+    payload = json.loads(out.stdout)
+except json.JSONDecodeError:
+    raise SystemExit(0)
+rows = payload.get("data") if isinstance(payload, dict) and payload.get("ok") else None
+if not isinstance(rows, list):
+    raise SystemExit(0)
+
+now = time.time() * 1000
+window = 15 * 60 * 1000
+current, upcoming = [], []
+for row in rows:
+    if not isinstance(row, dict) or row.get("allDay"):
+        continue
+    title = row.get("title")
+    start, end = row.get("startMs"), row.get("endMs")
+    if not isinstance(title, str) or not title.strip():
+        continue
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        continue
+    if end <= now:
+        continue
+    conf = row.get("conference")
+    if not isinstance(conf, str) or not conf.startswith(("http://", "https://")):
+        conf = ""
+    item = (start, title.strip().replace("\n", " ").replace("\r", " "), conf, row.get("start"), row.get("end"))
+    if start <= now:
+        current.append(item)
+    elif start - now <= window:
+        upcoming.append(item)
+
+if current:
+    current.sort(key=lambda item: (bool(item[2]), item[0]))
+    chosen = current[-1]
+elif upcoming:
+    upcoming.sort(key=lambda item: item[0])
+    chosen = upcoming[0]
+else:
+    raise SystemExit(0)
+
+start, title, conf, start_s, end_s = chosen
+begin, finish = clock(start_s), clock(end_s)
+when = f"{begin}–{finish}" if begin and finish else ""
+print(json.dumps({"title": title[:200], "when": when, "url": conf}, ensure_ascii=False))
+PY
+}
+
+cmd_simple() {
+  if "$recorder" "$1" >/dev/null; then
+    echo ok
+  else
+    echo "failed: the recorder is not running"
+    return 1
+  fi
+}
+
+cmd_actions() {
+  local out
+  out=$("$recorder" action 2>&1 || true)
+  printf '%s\n' "$out" | awk '/^  / { sub(/^  /, ""); print }'
+}
+
+cmd_latest() {
+  python3 - "$1" "$meetings" <<'PY'
+import json, sys, time
+from pathlib import Path
+
+title = sys.argv[1]
+root = Path(sys.argv[2])
+
+def safe(text):
+    cleaned = "".join("-" if c in '/\\:*?"<>|' else c for c in text)
+    trimmed = cleaned.strip(" .")
+    return trimmed or "Meeting"
+
+if not root.is_dir():
+    sys.exit(0)
+
+want = safe(title) if title else ""
+dirs = [p for p in root.iterdir() if p.is_dir() and (p / "transcript.md").is_file()]
+dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+def manifest_title(path):
+    for manifest in path.glob("*.meeting-recorder"):
+        try:
+            data = json.loads(manifest.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("title"), str):
+            return data["title"]
+    return ""
+
+now = time.time()
+for path in dirs:
+    if not want:
+        if now - path.stat().st_mtime < 15 * 60:
+            print(path)
+        break
+    stored = manifest_title(path)
+    name = path.name
+    suffix = name[13:] if len(name) > 13 and name[12] == " " and name[:12].isdigit() else name
+    if suffix == want or stored == title or safe(stored) == want:
+        print(path)
+        break
+PY
+}
+
+cmd_run() {
+  local name=$1 folder=$2
+  [[ -n $name && -d $folder ]] || { echo "missing meeting folder"; return 1; }
+  "$recorder" action "$name" "$folder"
+}
+
+usage() {
+  echo "Usage: meeting-bar start [title]|pause|stop|open <url>|agenda|actions|latest [title]|run <name> <folder>" >&2
+  return 2
+}
+
+case ${1:-} in
+  start) cmd_start "${2:-}" ;;
+  pause) cmd_simple pause ;;
+  stop) cmd_simple stop ;;
+  open) cmd_open "${2:-}" ;;
+  agenda) cmd_agenda ;;
+  actions) cmd_actions ;;
+  latest) cmd_latest "${2:-}" ;;
+  run) cmd_run "${2:-}" "${3:-}" ;;
+  *) usage ;;
+esac

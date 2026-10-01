@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "gigasolo.gigameeting",
+  "name": "GigaMeeting",
+  "version": "1.0.0",
+  "author": "GigaSolo",
+  "description": "Start, pause, and stop Meeting Recorder from the bar, then run your actions when the transcript is ready.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Widget.qml" },
+  "barWidget": {
+    "displayName": "GigaMeeting",
+    "description": "Record a meeting and run your Meeting Recorder actions",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
