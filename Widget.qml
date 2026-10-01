@@ -38,6 +38,10 @@ BarWidget {
   property bool acting: false
   property var actions: []
   property string savedDefault: ""
+  property bool queryBusy: false
+  property bool queryActions: false
+  property bool queryOffer: false
+  property bool queryLatest: false
   property bool menuOpen: false
 
   readonly property string defaultAction: {
@@ -129,6 +133,9 @@ BarWidget {
       root.computerLevel = 0
     }
     root.recorderState = next
+    var wasLive = prev === "recording" || prev === "paused" || prev === "stopping" || prev === "transcribing"
+    var nowLive = next === "recording" || next === "paused" || next === "stopping" || next === "transcribing"
+    if (wasLive && !nowLive) root.armedTitle = ""
     if (next === "recording" && root.statusLine === "Couldn't open the meeting link")
       root.statusLine = ""
     if (root.panelOpen && root.ready && prev !== next
@@ -149,6 +156,9 @@ BarWidget {
 
   function close() {
     root.panelOpen = false
+    root.offerTitle = ""
+    root.offerWhen = ""
+    root.offerUrl = ""
   }
 
   function toggle() {
@@ -177,13 +187,26 @@ BarWidget {
     return true
   }
 
-  function runQuery(args, done) {
-    if (queryProc.running) {
-      queryLater.args = args
-      queryLater.done = done
-      queryLater.pending = true
+  function pumpQuery() {
+    if (root.queryBusy || queryProc.running) return
+    var args = null
+    var done = null
+    if (root.queryActions) {
+      root.queryActions = false
+      args = ["actions"]
+      done = function(code, text) { root.actionsReady(code, text) }
+    } else if (root.queryOffer) {
+      root.queryOffer = false
+      args = ["agenda"]
+      done = function(code, text) { root.offerReady(code, text) }
+    } else if (root.queryLatest) {
+      root.queryLatest = false
+      args = ["latest", root.captureTitle]
+      done = function(code, text) { root.latestReady(code, text) }
+    } else {
       return
     }
+    root.queryBusy = true
     root.queryCallback = done
     root.queryOutput = ""
     root.queryArgs = args
@@ -242,29 +265,32 @@ BarWidget {
 
   function refreshOffer() {
     if (!root.panelOpen || !root.ready) return
-    root.runQuery(["agenda"], function(code, text) {
-      if (!root.ready) return
-      var line = String(text || "").trim().split("\n")[0] || ""
-      if (!line) {
-        root.offerTitle = ""
-        root.offerWhen = ""
-        root.offerUrl = ""
-        return
-      }
-      var data
-      try { data = JSON.parse(line) } catch (e) {
-        root.offerTitle = ""
-        root.offerWhen = ""
-        root.offerUrl = ""
-        return
-      }
-      var title = typeof data.title === "string" ? data.title.trim() : ""
-      var url = typeof data.url === "string" ? data.url : ""
-      if (url.indexOf("https://") !== 0 && url.indexOf("http://") !== 0) url = ""
-      root.offerTitle = title.slice(0, root.maxTitleLength)
-      root.offerWhen = typeof data.when === "string" ? data.when.slice(0, 40) : ""
-      root.offerUrl = url.slice(0, 2000)
-    })
+    root.queryOffer = true
+    root.pumpQuery()
+  }
+
+  function offerReady(code, text) {
+    if (!root.ready) return
+    var line = String(text || "").trim().split("\n")[0] || ""
+    if (!line) {
+      root.offerTitle = ""
+      root.offerWhen = ""
+      root.offerUrl = ""
+      return
+    }
+    var data
+    try { data = JSON.parse(line) } catch (e) {
+      root.offerTitle = ""
+      root.offerWhen = ""
+      root.offerUrl = ""
+      return
+    }
+    var title = typeof data.title === "string" ? data.title.trim() : ""
+    var url = typeof data.url === "string" ? data.url : ""
+    if (url.indexOf("https://") !== 0 && url.indexOf("http://") !== 0) url = ""
+    root.offerTitle = title.slice(0, root.maxTitleLength)
+    root.offerWhen = typeof data.when === "string" ? data.when.slice(0, 40) : ""
+    root.offerUrl = url.slice(0, 2000)
   }
 
   function pauseRecording() {
@@ -284,15 +310,18 @@ BarWidget {
   }
 
   function refreshActions() {
-    root.runQuery(["actions"], function(code, text) {
-      var lines = String(text || "").split("\n")
-      var names = []
-      for (var i = 0; i < lines.length; i++) {
-        var name = lines[i].trim()
-        if (name) names.push(name)
-      }
-      root.actions = names
-    })
+    root.queryActions = true
+    root.pumpQuery()
+  }
+
+  function actionsReady(code, text) {
+    var lines = String(text || "").split("\n")
+    var names = []
+    for (var i = 0; i < lines.length; i++) {
+      var name = lines[i].trim()
+      if (name) names.push(name)
+    }
+    root.actions = names
   }
 
   function captureDone() {
@@ -303,17 +332,20 @@ BarWidget {
   }
 
   function resolveLatest() {
-    root.runQuery(["latest", root.captureTitle], function(code, text) {
-      var path = String(text || "").trim().split("\n")[0] || ""
-      if (path) {
-        root.pendingFolder = path
-        root.pendingTitle = root.captureTitle || root.title
-        return
-      }
-      root.latestTries += 1
-      if (root.latestTries < 8) latestTimer.restart()
-      else root.statusLine = "Couldn't find the meeting folder"
-    })
+    root.queryLatest = true
+    root.pumpQuery()
+  }
+
+  function latestReady(code, text) {
+    var path = String(text || "").trim().split("\n")[0] || ""
+    if (path) {
+      root.pendingFolder = path
+      root.pendingTitle = root.captureTitle || root.title
+      return
+    }
+    root.latestTries += 1
+    if (root.latestTries < 8) latestTimer.restart()
+    else root.statusLine = "Couldn't find the meeting folder"
   }
 
   function runAction(name) {
@@ -379,13 +411,6 @@ BarWidget {
     onTriggered: root.refreshOffer()
   }
 
-  QtObject {
-    id: queryLater
-    property bool pending: false
-    property var args: []
-    property var done: null
-  }
-
   Process {
     id: controlProc
     command: [root.helper].concat(root.controlArgs)
@@ -408,14 +433,9 @@ BarWidget {
       var text = root.queryOutput
       var done = root.queryCallback
       root.queryCallback = null
+      root.queryBusy = false
       if (done) done(code, text)
-      if (queryLater.pending) {
-        var args = queryLater.args
-        var next = queryLater.done
-        queryLater.pending = false
-        queryLater.done = null
-        root.runQuery(args, next)
-      }
+      Qt.callLater(function() { root.pumpQuery() })
     }
   }
 

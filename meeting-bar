@@ -203,11 +203,32 @@ def safe(text):
     trimmed = cleaned.strip(" .")
     return trimmed or "Meeting"
 
+def contained(path):
+    try:
+        resolved = path.resolve(strict=True)
+        base = root.resolve(strict=True)
+    except OSError:
+        return None
+    if resolved == base or base not in resolved.parents:
+        return None
+    if not (resolved / "transcript.md").is_file():
+        return None
+    return resolved
+
 if not root.is_dir():
     sys.exit(0)
 
 want = safe(title) if title else ""
-dirs = [p for p in root.iterdir() if p.is_dir() and (p / "transcript.md").is_file()]
+dirs = []
+seen = set()
+for path in root.iterdir():
+    if not path.is_dir():
+        continue
+    resolved = contained(path)
+    if resolved is None or resolved in seen:
+        continue
+    seen.add(resolved)
+    dirs.append(resolved)
 dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
 def manifest_title(path):
@@ -236,9 +257,12 @@ PY
 }
 
 cmd_run() {
-  local name=$1 folder=$2
-  [[ -n $name && -d $folder ]] || { echo "missing meeting folder"; return 1; }
-  "$recorder" action "$name" "$folder"
+  local name=$1 folder=$2 root real
+  [[ -n $name && -n $folder ]] || { echo "missing meeting folder"; return 1; }
+  root=$(realpath -m "$meetings")
+  real=$(realpath -m "$folder")
+  [[ -d $real && -f $real/transcript.md && $real == "$root"/* ]] || { echo "missing meeting folder"; return 1; }
+  "$recorder" action "$name" "$real"
 }
 
 usage() {
