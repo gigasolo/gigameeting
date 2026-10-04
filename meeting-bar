@@ -4,8 +4,11 @@
 # available to the caller on the combined output.
 set -euo pipefail
 
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+calendar="$here/calendar.py"
 recorder=omarchy-meeting-recorder
-meetings="${HOME}/Documents/Meetings"
+meetings="${MEETINGS_ROOT:-$HOME/Documents/Meetings}"
+export MEETINGS_ROOT="$meetings"
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-meeting-recorder"
 
 one_state() {
@@ -95,13 +98,35 @@ cmd_start() {
   esac
 }
 
+# gio returns as soon as the handler starts. xdg-open waits for the program,
+# and a meeting app that stays open would pin the card. A handler still
+# running after a few seconds counts as opened and is left in its own session.
+open_detached() {
+  local target=$1 pid=0 i
+  if command -v gio >/dev/null 2>&1; then
+    setsid gio open "$target" >/dev/null 2>&1 &
+  else
+    setsid xdg-open "$target" >/dev/null 2>&1 &
+  fi
+  pid=$!
+  for ((i = 0; i < 30; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      return $?
+    fi
+    sleep 0.1
+  done
+  disown "$pid" 2>/dev/null || true
+  return 0
+}
+
 cmd_open() {
   local url=${1:-}
   if [[ ! $url =~ ^https?:// ]]; then
     echo "failed: not a meeting link"
     return 1
   fi
-  if xdg-open "$url" >/dev/null 2>&1; then
+  if open_detached "$url"; then
     echo opened
   else
     echo "failed: could not open the meeting link"
@@ -109,70 +134,36 @@ cmd_open() {
   fi
 }
 
+cmd_day() {
+  python3 "$calendar" day
+}
+
 cmd_agenda() {
-  python3 - <<'PY'
-import json, subprocess, time
+  python3 "$calendar" agenda
+}
 
-def clock(value):
-    if not isinstance(value, str) or "T" not in value:
-        return ""
-    hhmm = value.split("T", 1)[1][:5]
-    return hhmm if len(hhmm) == 5 and hhmm[2] == ":" else ""
+cmd_open_event() {
+  python3 "$calendar" open-event "$1"
+}
 
-try:
-    out = subprocess.run(
-        ["omacal", "agenda", "--days", "1", "--json"],
-        capture_output=True, text=True, timeout=10,
-    )
-except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit(0)
-if out.returncode != 0 or not out.stdout.strip():
-    raise SystemExit(0)
-try:
-    payload = json.loads(out.stdout)
-except json.JSONDecodeError:
-    raise SystemExit(0)
-rows = payload.get("data") if isinstance(payload, dict) and payload.get("ok") else None
-if not isinstance(rows, list):
-    raise SystemExit(0)
+cmd_prep() {
+  python3 "$calendar" prep "$1"
+}
 
-now = time.time() * 1000
-window = 15 * 60 * 1000
-current, upcoming = [], []
-for row in rows:
-    if not isinstance(row, dict) or row.get("allDay"):
-        continue
-    title = row.get("title")
-    start, end = row.get("startMs"), row.get("endMs")
-    if not isinstance(title, str) or not title.strip():
-        continue
-    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
-        continue
-    if end <= now:
-        continue
-    conf = row.get("conference")
-    if not isinstance(conf, str) or not conf.startswith(("http://", "https://")):
-        conf = ""
-    item = (start, title.strip().replace("\n", " ").replace("\r", " "), conf, row.get("start"), row.get("end"))
-    if start <= now:
-        current.append(item)
-    elif start - now <= window:
-        upcoming.append(item)
+cmd_open_note() {
+  python3 "$calendar" open-note "$1"
+}
 
-if current:
-    current.sort(key=lambda item: (bool(item[2]), item[0]))
-    chosen = current[-1]
-elif upcoming:
-    upcoming.sort(key=lambda item: item[0])
-    chosen = upcoming[0]
-else:
-    raise SystemExit(0)
+cmd_recent() {
+  python3 "$calendar" recent
+}
 
-start, title, conf, start_s, end_s = chosen
-begin, finish = clock(start_s), clock(end_s)
-when = f"{begin}–{finish}" if begin and finish else ""
-print(json.dumps({"title": title[:200], "when": when, "url": conf}, ensure_ascii=False))
-PY
+cmd_open_recent() {
+  python3 "$calendar" open-recent "$1" "$2"
+}
+
+cmd_audio() {
+  python3 "$calendar" audio "$1"
 }
 
 cmd_simple() {
@@ -266,7 +257,7 @@ cmd_run() {
 }
 
 usage() {
-  echo "Usage: meeting-bar start [title]|pause|stop|open <url>|agenda|actions|latest [title]|run <name> <folder>" >&2
+  echo "Usage: meeting-bar start [title]|pause|stop|open <url>|day|agenda|open-event <id>|prep <id>|open-note <url>|recent|open-recent <id> <kind>|audio <id>|actions|latest [title]|run <name> <folder>" >&2
   return 2
 }
 
@@ -275,7 +266,14 @@ case ${1:-} in
   pause) cmd_simple pause ;;
   stop) cmd_simple stop ;;
   open) cmd_open "${2:-}" ;;
+  day) cmd_day ;;
   agenda) cmd_agenda ;;
+  open-event) cmd_open_event "${2:-}" ;;
+  prep) cmd_prep "${2:-}" ;;
+  open-note) cmd_open_note "${2:-}" ;;
+  recent) cmd_recent ;;
+  open-recent) cmd_open_recent "${2:-}" "${3:-}" ;;
+  audio) cmd_audio "${2:-}" ;;
   actions) cmd_actions ;;
   latest) cmd_latest "${2:-}" ;;
   run) cmd_run "${2:-}" "${3:-}" ;;

@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "gigasolo.gigameeting",
   "name": "GigaMeeting",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "GigaSolo",
   "license": "MIT",
   "homepage": "https://github.com/gigasolo/gigameeting",
-  "description": "Requires Meeting Recorder. Join the meeting that is happening now, or starting within 15 minutes, record it under that name, and run an action when the transcript is ready.",
+  "description": "Requires Meeting Recorder. Shows today's meetings and recent recordings, joins the one happening now, records it, and runs an action when the transcript is ready.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "Widget.qml" },
   "barWidget": {
