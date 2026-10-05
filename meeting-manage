@@ -30,7 +30,39 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-VAULT = Path(os.path.expanduser(os.environ.get("OBSIDIAN_VAULT", "~/Documents/Obsidian")))
+def vault_from_obsidian_config(data: object) -> Path | None:
+    """The vault Obsidian has open, or the only vault it knows."""
+    vaults = data.get("vaults") if isinstance(data, dict) else None
+    if not isinstance(vaults, dict):
+        return None
+    opened: list[str] = []
+    known: list[str] = []
+    for item in vaults.values():
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
+            continue
+        known.append(path)
+        if item.get("open") is True:
+            opened.append(path)
+    chosen = opened[0] if len(opened) == 1 else known[0] if len(known) == 1 else ""
+    return Path(chosen) if chosen else None
+
+
+def default_vault() -> Path:
+    override = os.environ.get("OBSIDIAN_VAULT")
+    if override:
+        return Path(os.path.expanduser(override))
+    config = Path.home() / ".config" / "obsidian" / "obsidian.json"
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        data = {}
+    return vault_from_obsidian_config(data) or Path.home() / "Documents" / "Obsidian"
+
+
+VAULT = default_vault()
 FOLDER = os.environ.get("OBSIDIAN_FOLDER", "Meetings")
 MEETINGS_ROOT = Path(os.path.expanduser(os.environ.get("MEETINGS_ROOT", "~/Documents/Meetings")))
 SIDECAR = ".obsidian-filed.json"

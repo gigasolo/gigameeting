@@ -30,7 +30,7 @@ yay -S omarchy-meeting-recorder
 
 That is the same install [Meeting Recorder documents](https://github.com/jankeesvw/omarchy-meeting-recorder#install). The package on disk is `omarchy-meeting-recorder-bin`. The first transcription downloads the speech model, about 1.6 GB, once.
 
-`hey` is optional. When it is signed in, opening the card reads today's timed meetings from it. `omacal` is the spare: if HEY cannot be reached, it still offers the one meeting that is happening now or starts within 15 minutes. Without either, the card stays on Record.
+`hey` is optional. When it is signed in, opening the card reads today's and tomorrow's timed meetings from it. `omacal` is the spare: if HEY cannot be reached, it still lists those two days. The join row is the one meeting happening now, or the one that starts within 15 minutes. Without either, the card stays on Record.
 
 ## Install the card
 
@@ -57,10 +57,10 @@ Click the icon to open the card. Click it again to close. The icon never starts 
 
 | | |
 | --- | --- |
-| **Record** | Starts Meeting Recorder when it is ready. |
-| **Join and record** | A timed event is happening, or starts within 15 minutes. The recording takes the event's name. All-day events are skipped. |
-| **Later** | The other timed meetings today, a few rows, clock and title. A row does not start a recording. |
-| **Prep** | Writes a short brief in the vault from that invite and past notes that mention the same people, or the same meeting title. Open brief jumps to it. Nothing is sent. |
+| **Record** | Starts Meeting Recorder when it is ready, and also while the previous meeting is still being transcribed. It does not start a second recording over one that is already going. |
+| **Join and record** | A timed event is happening, or starts within 15 minutes. The recording takes the event's name. All-day events are skipped. It follows the same rule as Record. |
+| **Later** | The other timed meetings today, then tomorrow under Tomorrow, a few rows each, clock and title. The list stays up during a recording, a transcription, a prep, and an action. A row does not start a recording. |
+| **Prep** | Writes a short brief in the vault from that invite and past notes with the same title, or that name the same people. A past meeting is a sentence or two plus a link to that insight or transcript. Earlier prep notes are left out. A join link is not treated as a description. The note uses that meeting's own date. When that note exists, Brief replaces Prep and opens it. The chevron on Brief preps again: the old note is removed, a new one is written, and Brief shows Preparing while that runs. Closing the card leaves Preparing in place. Other meetings can be prepped at the same time. Open brief under the list opens the one just written. Nothing is sent. |
 | **History** | Turns the card over to recent recordings, grouped by day. Play plays that recording in the card. Transcript and Insights open the note, and the next link still works. Today turns it back. A row does not start a recording. |
 | **Pause** | Holds the take. Resume continues it. |
 | **Stop** | Saves the recording and transcribes it. |
@@ -88,7 +88,7 @@ Point that path at this repo:
 ln -sf ~/.config/omarchy/plugins/gigasolo.gigameeting/meeting-manage ~/.local/bin/meeting-manage
 ```
 
-The vault defaults to `~/Documents/Obsidian`, the notes folder to `Meetings`, and the recordings to `~/Documents/Meetings`. `OBSIDIAN_VAULT`, `OBSIDIAN_FOLDER`, and `MEETINGS_ROOT` override those.
+The vault is the one Obsidian has open. If Obsidian has no vault, it is `~/Documents/Obsidian`. The notes folder is `Meetings`, and the recordings are `~/Documents/Meetings`. `OBSIDIAN_VAULT`, `OBSIDIAN_FOLDER`, and `MEETINGS_ROOT` override those.
 
 ## Remove
 

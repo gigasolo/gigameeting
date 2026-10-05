@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Today's meetings, and recent recordings, for the GigaMeeting card.
+"""Today's and tomorrow's meetings, and recent recordings, for the GigaMeeting card.
 
-`day` reads HEY's day view. The card gets titles and clock times. The join
-link, invite text, and people stay in a private cache for Prep. If HEY
-cannot be reached, `day` falls back to one OmaCal offer and no list.
+`day` reads HEY's day view for today and tomorrow. The card gets titles and
+clock times. The join link, invite text, and people stay in a private cache
+for Prep. If HEY cannot be reached, `day` falls back to OmaCal for those two
+days. That spare list has no Prep.
 
 `recent` lists recording folders. The card gets a title, a date, and which
 documents exist. Paths stay here. `audio` prints one recording path for the
@@ -25,7 +26,39 @@ import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 
-VAULT = Path(os.path.expanduser(os.environ.get("OBSIDIAN_VAULT", "~/Documents/Obsidian")))
+def vault_from_obsidian_config(data: object) -> Path | None:
+    """The vault Obsidian has open, or the only vault it knows."""
+    vaults = data.get("vaults") if isinstance(data, dict) else None
+    if not isinstance(vaults, dict):
+        return None
+    opened: list[str] = []
+    known: list[str] = []
+    for item in vaults.values():
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
+            continue
+        known.append(path)
+        if item.get("open") is True:
+            opened.append(path)
+    chosen = opened[0] if len(opened) == 1 else known[0] if len(known) == 1 else ""
+    return Path(chosen) if chosen else None
+
+
+def default_vault() -> Path:
+    override = os.environ.get("OBSIDIAN_VAULT")
+    if override:
+        return Path(os.path.expanduser(override))
+    config = Path.home() / ".config" / "obsidian" / "obsidian.json"
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        data = {}
+    return vault_from_obsidian_config(data) or Path.home() / "Documents" / "Obsidian"
+
+
+VAULT = default_vault()
 FOLDER = os.environ.get("OBSIDIAN_FOLDER", "Meetings")
 MEETINGS = Path(os.path.expanduser(os.environ.get("MEETINGS_ROOT", "~/Documents/Meetings")))
 STATE = Path(
@@ -36,7 +69,6 @@ STATE = Path(
         )
     )
 )
-WINDOW_MS = 15 * 60 * 1000
 MAX_EVENTS = 8
 MAX_RECENT = 6
 AUDIO_SUFFIXES = {".ogg", ".opus", ".mp3", ".wav", ".m4a", ".flac"}
@@ -45,6 +77,9 @@ ASK_TIMEOUT = 120
 ILLEGAL = re.compile(r'[\\/:*?"<>|]')
 TAG = re.compile(r"<[^>]+>")
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+EVENT_RE = re.compile(r'(?m)^event: "((?:\\.|[^"\\])*)"\s*$')
+DATE_LINE_RE = re.compile(r"(?m)^date: (\d{4}-\d{2}-\d{2})\s*$")
 HEADINGS = (
     "## Summary",
     "## Insights",
@@ -65,6 +100,14 @@ Use exactly these headings, in this order:
 ## Last time
 ## Still open
 ## Worth raising
+
+What this is is one or two sentences from the invite.
+
+Last time is at most two sentences for each past meeting. End that text with the wiki link from the note's Link line, copied exactly. Prefer the Insights link, and include the transcript link on the same line when that meeting has one. Do not quote dialogue. Do not paste headings, summaries, or an earlier brief.
+
+Still open is one sentence, with that same Insights link. If nothing was left open, write "None yet."
+
+Worth raising is one sentence, or "None yet."
 
 If the invite has no description, say so under What this is.
 If there are no past notes, say this looks like the first one, and write "None yet." under Last time and Still open.
@@ -113,8 +156,12 @@ def clock(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000).astimezone().strftime("%H:%M")
 
 
+def local_day(offset: int = 0) -> str:
+    return (datetime.now().astimezone().date() + timedelta(days=offset)).isoformat()
+
+
 def local_today() -> str:
-    return datetime.now().astimezone().strftime("%Y-%m-%d")
+    return local_day(0)
 
 
 def people_of(row: dict) -> list[dict]:
@@ -141,7 +188,7 @@ def people_of(row: dict) -> list[dict]:
     return people
 
 
-def normalize_hey(rows: list, now_ms: float) -> list[dict]:
+def normalize_hey(rows: list, now_ms: float, day: str) -> list[dict]:
     events = []
     seen = set()
     for row in rows:
@@ -170,6 +217,7 @@ def normalize_hey(rows: list, now_ms: float) -> list[dict]:
                 "when": f"{clock(start)}–{clock(end)}",
                 "start": start,
                 "end": end,
+                "date": day,
                 "url": join_url(row.get("join_link")),
                 "summary": plain(row.get("summary"), 500),
                 "description": plain(row.get("description"), 4000),
@@ -180,10 +228,10 @@ def normalize_hey(rows: list, now_ms: float) -> list[dict]:
     return events[:MAX_EVENTS]
 
 
-def hey_rows() -> list | None:
+def hey_rows(day: str) -> list | None:
     try:
         out = subprocess.run(
-            ["hey", "event", "day", "--quiet", "--json"],
+            ["hey", "event", "day", day, "--quiet", "--json"],
             capture_output=True,
             text=True,
             timeout=12,
@@ -216,57 +264,74 @@ def clock_range(start: object, end: object) -> str:
     return ""
 
 
-def omacal_offer(now_ms: float | None = None) -> dict | None:
+def local_date_of_ms(ms: float) -> str:
+    return datetime.fromtimestamp(ms / 1000).astimezone().strftime("%Y-%m-%d")
+
+
+def omacal_events(now_ms: float | None = None) -> list[dict]:
     try:
         out = subprocess.run(
-            ["omacal", "agenda", "--days", "1", "--json"],
+            ["omacal", "agenda", "--days", "2", "--json"],
             capture_output=True,
             text=True,
             timeout=8,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return []
     if out.returncode != 0 or not out.stdout.strip():
-        return None
+        return []
     try:
         payload = json.loads(out.stdout)
     except json.JSONDecodeError:
-        return None
+        return []
     rows = payload.get("data") if isinstance(payload, dict) and payload.get("ok") else None
     if not isinstance(rows, list):
-        return None
+        return []
     now = time.time() * 1000 if now_ms is None else now_ms
-    current, upcoming = [], []
+    today, tomorrow = local_day(0), local_day(1)
+    kept = []
     for row in rows:
         if not isinstance(row, dict) or row.get("allDay"):
             continue
         title = plain(row.get("title"), 200)
         start, end = row.get("startMs"), row.get("endMs")
-        if not title or not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        if not title or isinstance(start, bool) or isinstance(end, bool):
+            continue
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
             continue
         if end <= now:
             continue
+        day = local_date_of_ms(start)
+        if day not in (today, tomorrow):
+            continue
         url = join_url(row.get("conference"))
-        item = (start, title, url, clock_range(row.get("start"), row.get("end")))
-        if start <= now:
-            current.append(item)
-        elif start - now <= WINDOW_MS:
-            upcoming.append(item)
-    if current:
-        current.sort(key=lambda item: (bool(item[2]), item[0]))
-        chosen = current[-1]
-    elif upcoming:
-        upcoming.sort(key=lambda item: item[0])
-        chosen = upcoming[0]
-    else:
-        return None
-    _start, title, url, when = chosen
-    return {"title": title, "when": when, "url": url}
+        kept.append(
+            {
+                "id": "",
+                "title": title,
+                "when": clock_range(row.get("start"), row.get("end")),
+                "start": start,
+                "end": end,
+                "date": day,
+                "hasUrl": bool(url),
+                "url": url,
+                "brief": "",
+            }
+        )
+    kept.sort(key=lambda item: item["start"])
+    counts = {today: 0, tomorrow: 0}
+    capped = []
+    for item in kept:
+        if counts[item["date"]] >= MAX_EVENTS:
+            continue
+        counts[item["date"]] += 1
+        capped.append(item)
+    return capped
 
 
-def write_cache(events: list[dict]) -> None:
+def write_cache(today: str, tomorrow: str, events: list[dict]) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    blob = json.dumps({"date": local_today(), "events": events}, ensure_ascii=False)
+    blob = json.dumps({"date": today, "through": tomorrow, "events": events}, ensure_ascii=False)
     temporary = STATE.with_suffix(".json.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -283,48 +348,92 @@ def read_cache() -> list[dict]:
         payload = json.loads(STATE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
-    if not isinstance(payload, dict) or payload.get("date") != local_today():
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("date") != local_day(0) or payload.get("through") != local_day(1):
         return []
     events = payload.get("events")
     return events if isinstance(events, list) else []
 
 
-def card_event(event: dict) -> dict:
+def card_event(event: dict, briefs: dict[tuple[str, str], str]) -> dict:
+    day = event["date"]
     return {
-        "id": event["id"],
+        "id": f"{event['id']}@{day}",
         "title": event["title"],
         "when": event["when"],
         "start": event["start"],
         "end": event["end"],
+        "date": day,
         "hasUrl": bool(event.get("url")),
+        "brief": briefs.get((str(event["id"]), day), ""),
     }
 
 
 def cmd_day() -> None:
-    rows = hey_rows()
-    if rows is not None:
-        events = normalize_hey(rows, time.time() * 1000)
-        try:
-            write_cache(events)
-        except OSError:
-            events = [{**event, "url": ""} for event in events]
-        print(json.dumps({"source": "hey", "events": [card_event(event) for event in events]}, ensure_ascii=False))
+    today = local_day(0)
+    rows = hey_rows(today)
+    if rows is None:
+        print(json.dumps({"source": "omacal", "events": omacal_events()}, ensure_ascii=False))
         return
-    offer = omacal_offer()
-    print(json.dumps({"source": "omacal", "events": [], "offer": offer}, ensure_ascii=False))
+    tomorrow = local_day(1)
+    more = hey_rows(tomorrow)
+    now_ms = time.time() * 1000
+    events = normalize_hey(rows, now_ms, today)
+    if more is not None:
+        events.extend(normalize_hey(more, now_ms, tomorrow))
+    try:
+        write_cache(today, tomorrow, events)
+    except OSError:
+        events = [{**event, "url": ""} for event in events]
+    briefs = prep_index()
+    print(json.dumps({
+        "source": "hey",
+        "today": today,
+        "tomorrow": tomorrow,
+        "events": [card_event(event, briefs) for event in events],
+    }, ensure_ascii=False))
 
 
 def cmd_agenda() -> None:
-    offer = omacal_offer()
-    if offer:
-        print(json.dumps(offer, ensure_ascii=False))
+    print(json.dumps({"events": omacal_events()}, ensure_ascii=False))
 
 
-def event_by_id(event_id: str) -> dict | None:
-    if not event_id or any(char in event_id for char in "\n\r\x00"):
+def valid_day(day: str) -> bool:
+    if not DATE_RE.match(day):
+        return False
+    year_s, month_s, day_s = day.split("-")
+    year, month, day_n = int(year_s), int(month_s), int(day_s)
+    if month < 1 or month > 12 or day_n < 1:
+        return False
+    if month in (4, 6, 9, 11):
+        return day_n <= 30
+    if month == 2:
+        leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+        return day_n <= (29 if leap else 28)
+    return day_n <= 31
+
+
+def split_key(value: str) -> tuple[str, str] | None:
+    if not isinstance(value, str) or value.count("@") != 1:
         return None
+    hey_id, day = value.split("@", 1)
+    if not hey_id or len(hey_id) > 80 or any(char in hey_id for char in "\n\r\x00"):
+        return None
+    if not valid_day(day):
+        return None
+    return hey_id, day
+
+
+def event_by_id(key: str) -> dict | None:
+    parsed = split_key(key)
+    if parsed is None:
+        return None
+    hey_id, day = parsed
     for event in read_cache():
-        if isinstance(event, dict) and str(event.get("id")) == event_id:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("id")) == hey_id and event.get("date") == day:
             return event
     return None
 
@@ -371,19 +480,68 @@ def section(text: str, heading: str) -> str:
     return (heading + "\n" + body.strip()).strip()
 
 
-def excerpt(text: str) -> str:
+def without_frontmatter(text: str) -> str:
     if text.startswith("---"):
         end = text.find("\n---", 3)
         if end != -1:
-            text = text[end + 4:]
+            return text[end + 4:]
+    return text
+
+
+def plain_body(text: str, heading: str) -> str:
+    chunk = section(text, heading)
+    if not chunk:
+        return ""
+    return re.sub(r"\s+", " ", chunk[len(heading):]).strip()
+
+
+def one_sentence(text: str, limit: int = 220) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", text)
+    if not text:
+        return ""
+    stop = len(text)
+    for mark in (". ", "? ", "! "):
+        at = text.find(mark)
+        if at != -1:
+            stop = min(stop, at + 1)
+    sentence = text[:stop].strip()
+    if len(sentence) <= limit:
+        return sentence
+    cut = sentence[:limit].rsplit(" ", 1)[0].rstrip(".,;:")
+    return (cut or sentence[:limit]) + "…"
+
+
+def excerpt(text: str) -> str:
+    text = without_frontmatter(text)
     cut = text.find("## Transcript")
     if cut != -1:
         text = text[:cut]
-    chunks = [section(text, heading) for heading in HEADINGS]
-    blob = "\n\n".join(chunk for chunk in chunks if chunk).strip()
+    parts: list[str] = []
+    for heading, limit in (
+        ("## Summary", 400),
+        ("## Open questions", 240),
+        ("## Actions", 200),
+        ("## Insights", 240),
+    ):
+        body = plain_body(text, heading)
+        if body:
+            parts.append(heading + "\n" + one_sentence(body, limit))
+    blob = "\n\n".join(parts).strip()
     if not blob:
-        blob = text.strip()[:600]
-    return blob[:1500]
+        if cut != -1:
+            return "Transcript only. What was said is in the linked note."
+        blob = re.sub(r"\s+", " ", text).strip()[:400]
+    return blob[:1200]
+
+
+def wiki_link(path: Path) -> str:
+    """Obsidian wiki link for a vault note. note_link() is the card's obsidian:// URL."""
+    try:
+        rel = path.resolve().relative_to(VAULT.resolve()).with_suffix("")
+    except (OSError, ValueError):
+        rel = path.with_suffix("")
+    return "[[" + rel.as_posix() + "]]"
 
 
 def title_of(path: Path) -> str:
@@ -395,6 +553,122 @@ def title_of(path: Path) -> str:
     return stem.strip()
 
 
+def note_day(path: Path) -> str:
+    stem = path.stem
+    if len(stem) < 10 or stem[4] != "-" or stem[7] != "-":
+        return ""
+    day = stem[:10]
+    if not (day[:4].isdigit() and day[5:7].isdigit() and day[8:10].isdigit()):
+        return ""
+    return day
+
+
+TITLE_STOP = {
+    "a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "at", "with",
+    "meeting", "discussion",
+}
+
+
+def title_tokens(title: str) -> set[str]:
+    return {
+        word
+        for word in re.findall(r"[a-z0-9]+", title.casefold())
+        if word not in TITLE_STOP and len(word) >= 2
+    }
+
+
+def titles_related(left: str, right: str) -> bool:
+    """Same meeting, a one-character title typo, or a renamed series such as an added topic."""
+    if titles_near(left, right):
+        return True
+    left_tokens = title_tokens(left)
+    right_tokens = title_tokens(right)
+    if len(left_tokens) < 2 or len(right_tokens) < 2:
+        return False
+    shared = left_tokens & right_tokens
+    if len(shared) < 2:
+        return False
+    return len(shared) / min(len(left_tokens), len(right_tokens)) >= 0.5
+
+
+def header_people(text: str) -> set[str]:
+    """First names from [[Name]] links in the note header. Insight notes store speakers this way."""
+    head = text.split("\n## ", 1)[0]
+    found: set[str] = set()
+    for raw in re.findall(r"\[\[([^\]|#]+)\]\]", head):
+        name = raw.strip()
+        if not name or "/" in name or len(name) > 40:
+            continue
+        token = re.split(r"[\s.]+", name)[0].casefold()
+        if len(token) >= 3 and token.isalpha():
+            found.add(token)
+    return found
+
+
+def attendee_keys(event: dict) -> set[str]:
+    found: set[str] = set()
+    for person in event.get("people") or []:
+        if not isinstance(person, dict):
+            continue
+        name = person.get("name") if isinstance(person.get("name"), str) else ""
+        email = person.get("email") if isinstance(person.get("email"), str) else ""
+        if name and "@" not in name:
+            token = re.split(r"[\s.]+", name.strip())[0].casefold()
+            if len(token) >= 3 and token.isalpha():
+                found.add(token)
+        if "@" in email:
+            token = re.split(r"[.\-_]", email.split("@", 1)[0])[0].casefold()
+            if len(token) >= 3 and token.isalpha():
+                found.add(token)
+    return found
+
+
+def invite_prose(event: dict) -> str:
+    """Invite text with the dial-in and join link removed. A repeated title is not a description."""
+    description = event.get("description") or ""
+    cleaned = re.sub(
+        r"(?i)\b(?:join with google meet:|or dial:|more phone numbers:|learn more about meet at:)"
+        r"|pin:\s*\d+#?|\(us\)\s*\+[\d][\d\-\s]{6,}\d|https?://\S+",
+        " ",
+        description,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,-")
+    summary = (event.get("summary") or "").strip()
+    title = (event.get("title") or "").strip()
+    if summary.casefold() == title.casefold():
+        summary = ""
+    if cleaned and summary and summary.casefold() not in cleaned.casefold():
+        return f"{summary}\n\n{cleaned}"
+    return cleaned or summary
+
+
+def titles_near(left: str, right: str) -> bool:
+    """True when two titles match, or differ by one inserted, deleted, or replaced character."""
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) > len(right):
+        left, right = right, left
+    edits = 0
+    i = 0
+    j = 0
+    while i < len(left) and j < len(right):
+        if left[i] == right[j]:
+            i += 1
+            j += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        if len(left) == len(right):
+            i += 1
+        j += 1
+    if i < len(left) or j < len(right):
+        edits += 1
+    return edits == 1
+
+
 def find_past(event: dict) -> list[tuple[Path, str]]:
     root = VAULT / FOLDER
     if not root.is_dir():
@@ -403,9 +677,9 @@ def find_past(event: dict) -> list[tuple[Path, str]]:
     title = event.get("title") or ""
     title_key = title.casefold()
     use_title = len(title) >= 12 and not title.casefold().startswith("meeting ")
-    found: list[tuple[float, Path, str]] = []
+    notes: list[dict] = []
     for path in root.rglob("*.md"):
-        if path.name == "Index.md" or path.parent.name == "audio":
+        if path.name == "Index.md" or path.parent.name in {"audio", "Prep"}:
             continue
         resolved = vault_file(path)
         if resolved is None:
@@ -416,20 +690,62 @@ def find_past(event: dict) -> list[tuple[Path, str]]:
             text = resolved.read_text(encoding="utf-8", errors="replace")[:80_000]
         except OSError:
             continue
-        folded = text.casefold()
-        why = ""
-        if any(email and email in folded for email in emails):
-            why = "email"
-        elif use_title and title_of(resolved).casefold() == title_key:
-            why = "title"
-        if not why:
+        notes.append({
+            "path": resolved,
+            "mtime": resolved.stat().st_mtime,
+            "title": title_of(resolved).casefold(),
+            "day": note_day(resolved),
+            "insights": resolved.stem.endswith(" — Insights"),
+            "people": header_people(text),
+            "folded": text.casefold(),
+        })
+
+    keys = attendee_keys(event)
+
+    def reason(note: dict) -> str:
+        if use_title and titles_related(note["title"], title_key):
+            return "title"
+        if any(email and email in note["folded"] for email in emails):
+            return "email"
+        if note["people"] & keys:
+            return "people"
+        return ""
+
+    def same_meeting(note: dict, seed: dict) -> bool:
+        if note["path"] == seed["path"]:
+            return True
+        if not note["day"] or note["day"] != seed["day"]:
+            return False
+        return titles_near(note["title"], seed["title"])
+
+    hits = [note for note in notes if reason(note)]
+    if any(reason(note) == "title" for note in hits):
+        hits = [note for note in hits if reason(note) == "title"]
+        hits.sort(key=lambda note: note["mtime"], reverse=True)
+    else:
+        hits.sort(key=lambda note: (len(note["people"] & keys), note["mtime"]), reverse=True)
+    seeds: list[dict] = []
+    for note in hits:
+        if any(same_meeting(note, seed) for seed in seeds):
             continue
-        found.append((resolved.stat().st_mtime, resolved, why))
-    found.sort(key=lambda item: item[0], reverse=True)
-    email_hits = [item for item in found if item[2] == "email"][:3]
-    if email_hits:
-        return [(path, why) for _mtime, path, why in email_hits]
-    return [(path, why) for _mtime, path, why in found[:3]]
+        seeds.append(note)
+        if len(seeds) == 3:
+            break
+    found: list[tuple[Path, str]] = []
+    used: set[Path] = set()
+    for seed in seeds:
+        members = [note for note in notes if same_meeting(note, seed)]
+        members.sort(key=lambda note: (not note["insights"], -note["mtime"]))
+        why = next(
+            (kind for kind in ("title", "email", "people") if any(reason(note) == kind for note in members)),
+            "title",
+        )
+        for note in members:
+            if note["path"] in used:
+                continue
+            used.add(note["path"])
+            found.append((note["path"], why))
+    return found
 
 
 def people_line(event: dict) -> str:
@@ -445,10 +761,10 @@ def people_line(event: dict) -> str:
 
 
 def context_for(event: dict, past: list[tuple[Path, str]]) -> str:
-    description = event.get("description") or ""
     summary = event.get("summary") or ""
-    invite = description or "The invite has no description."
-    if description and len(description) >= 250:
+    prose = invite_prose(event)
+    invite = prose or "The invite has no description."
+    if prose and len(prose) >= 250:
         invite += " The invite text may be cut off."
     lines = [
         f"Title: {event.get('title', '')}",
@@ -469,6 +785,7 @@ def context_for(event: dict, past: list[tuple[Path, str]]) -> str:
         except OSError:
             continue
         lines.append(f"### {path.stem} ({why})")
+        lines.append("Link: " + wiki_link(path))
         lines.append(body or "No notes.")
         lines.append("")
     text = "\n".join(lines).strip()
@@ -515,26 +832,56 @@ def ask(prompt: str, text: str) -> str:
 
 
 def factual_brief(event: dict, past: list[tuple[Path, str]]) -> str:
-    description = event.get("description") or ""
-    summary = event.get("summary") or ""
-    what = description or "The invite has no description."
-    if summary and summary not in what:
-        what = summary + "\n\n" + what
+    what = invite_prose(event) or "The invite has no description."
     if not past:
         last = "This looks like the first one."
         still = "None yet."
+        raising = "None yet."
     else:
-        blocks = []
+        notes: list[dict] = []
         for path, _why in past:
             try:
-                body = excerpt(path.read_text(encoding="utf-8", errors="replace"))
+                text = without_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 continue
-            if body:
-                blocks.append(f"**{path.stem}**\n\n{body}")
+            transcript_at = text.find("## Transcript")
+            prose = text if transcript_at == -1 else text[:transcript_at]
+            notes.append({
+                "path": path,
+                "day": note_day(path),
+                "title": title_of(path).casefold(),
+                "link": wiki_link(path),
+                "point": one_sentence(plain_body(prose, "## Summary") or plain_body(prose, "## Insights")),
+                "question": one_sentence(plain_body(prose, "## Open questions")),
+                "action": one_sentence(plain_body(prose, "## Actions")),
+            })
+        blocks: list[str] = []
+        opens: list[str] = []
+        raised: list[str] = []
+        index = 0
+        while index < len(notes):
+            current = notes[index]
+            links = [current["link"]]
+            point = current["point"]
+            question = current["question"]
+            action = current["action"]
+            nxt = index + 1
+            while nxt < len(notes) and notes[nxt]["day"] and notes[nxt]["day"] == current["day"] and titles_near(notes[nxt]["title"], current["title"]):
+                links.append(notes[nxt]["link"])
+                point = point or notes[nxt]["point"]
+                question = question or notes[nxt]["question"]
+                action = action or notes[nxt]["action"]
+                nxt += 1
+            cited = " ".join(links)
+            blocks.append(f"{point} {cited}".strip() if point else cited)
+            if question:
+                opens.append(f"{question} {links[0]}")
+            if action:
+                raised.append(f"{action} {links[0]}")
+            index = nxt
         last = "\n\n".join(blocks) or "This looks like the first one."
-        still = "None yet."
-    raising = "None yet." if not past else "See what was left open last time."
+        still = "\n\n".join(opens) if opens else "None yet."
+        raising = raised[0] if raised else "None yet."
     return (
         f"## What this is\n\n{what}\n\n"
         f"## Last time\n\n{last}\n\n"
@@ -550,38 +897,111 @@ def brief_body(event: dict, past: list[tuple[Path, str]]) -> str:
     return factual_brief(event, past)
 
 
-def existing_prep(event_id: str, day: str) -> Path | None:
+def unescape_yaml(value: str) -> str:
+    out = []
+    index = 0
+    while index < len(value):
+        if value[index] == "\\" and index + 1 < len(value):
+            out.append(value[index + 1])
+            index += 2
+            continue
+        out.append(value[index])
+        index += 1
+    return "".join(out)
+
+
+def prep_index() -> dict[tuple[str, str], str]:
     directory = VAULT / FOLDER / "Prep"
     if not directory.is_dir():
-        return None
-    needle = f"event: {yaml_quote(event_id)}"
+        return {}
+    index: dict[tuple[str, str], str] = {}
+    try:
+        base = VAULT.resolve(strict=True)
+    except OSError:
+        return {}
     for path in directory.glob("*.md"):
         resolved = vault_file(path)
         if resolved is None:
             continue
-        head = resolved.read_text(encoding="utf-8", errors="replace")[:1200]
+        try:
+            head = resolved.read_text(encoding="utf-8", errors="replace")[:1200]
+        except OSError:
+            continue
+        found_day = DATE_LINE_RE.search(head)
+        found_event = EVENT_RE.search(head)
+        if not found_day or not found_event:
+            continue
+        event_id = unescape_yaml(found_event.group(1))
+        if not event_id or len(event_id) > 80 or any(char in event_id for char in "\n\r\x00"):
+            continue
+        key = (event_id, found_day.group(1))
+        if key in index:
+            continue
+        rel = resolved.relative_to(base).with_suffix("")
+        index[key] = obsidian_link(str(rel))
+    return index
+
+
+def matching_preps(event_id: str, day: str) -> list[Path]:
+    directory = VAULT / FOLDER / "Prep"
+    if not directory.is_dir():
+        return []
+    needle = f"event: {yaml_quote(event_id)}"
+    found: list[Path] = []
+    for path in sorted(directory.glob("*.md")):
+        resolved = vault_file(path)
+        if resolved is None:
+            continue
+        try:
+            head = resolved.read_text(encoding="utf-8", errors="replace")[:1200]
+        except OSError:
+            continue
         if needle in head and f"date: {day}" in head:
-            return resolved
-    return None
+            found.append(resolved)
+    return found
 
 
-def cmd_prep(event_id: str) -> None:
-    event = event_by_id(event_id)
-    if not event or not event.get("title"):
-        fail("that meeting is no longer on today's list")
-    past = find_past(event)
-    day = local_today()
+def existing_prep(event_id: str, day: str) -> Path | None:
+    found = matching_preps(event_id, day)
+    return found[0] if found else None
+
+
+def cmd_prep(key: str) -> None:
+    parsed = split_key(key)
+    event = event_by_id(key)
+    if parsed is None or not event or not event.get("title"):
+        fail("that meeting is no longer on the list")
+    hey_id, day = parsed
+    if event.get("date") != day:
+        fail("that meeting is no longer on the list")
     directory = VAULT / FOLDER / "Prep"
     directory.mkdir(parents=True, exist_ok=True)
-    path = existing_prep(event_id, day) or (directory / f"{day} {safe_title(event['title'])}.md")
-    notes = my_notes_from(path)
+    old = matching_preps(hey_id, day)
+    notes = my_notes_from(old[0]) if old else "## My notes\n\n"
+    removed = {path.resolve() for path in old}
+    deleted = False
+    for path in old:
+        try:
+            path.unlink()
+        except OSError:
+            if deleted:
+                # The card drops Brief only after it sees this line.
+                print("replaced", flush=True)
+            fail("could not replace the old brief")
+        deleted = True
+    if deleted:
+        print("replaced", flush=True)
+    path = directory / f"{day} {safe_title(event['title'])}.md"
+    if path.exists() and path.resolve() not in removed:
+        fail("could not replace the old brief")
+    past = find_past(event)
     people = event.get("people") or []
     lines = [
         "---",
         f"date: {day}",
         "type: prep",
         "source: hey",
-        f"event: {yaml_quote(event_id)}",
+        f"event: {yaml_quote(hey_id)}",
         f"title: {yaml_quote(event['title'])}",
     ]
     emails = [person["email"] for person in people if person.get("email")]

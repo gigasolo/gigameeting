@@ -75,7 +75,7 @@ cmd_start() {
     recording|paused)
       echo already
       ;;
-    idle|done)
+    idle|done|transcribing)
       # `omarchy-meeting-recorder start "Meeting Name"`. No --name flag.
       if [[ -n $name ]]; then
         if "$recorder" start "$name" >/dev/null; then

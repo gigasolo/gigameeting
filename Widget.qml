@@ -6,10 +6,15 @@ import qs.Commons
 import qs.Ui
 
 // Bar control for Meeting Recorder. A click opens the card under the icon.
-// The card is a quiet status readout. Opening it reads today's timed meetings
-// from HEY. The one happening now, or starting within 15 minutes, can be
-// joined and recorded. Later rows can be prepped. They do not start a
-// recording. If HEY cannot be reached, OmaCal still offers that one meeting.
+// The card is a quiet status readout. Opening it reads today's and tomorrow's
+// timed meetings from HEY. The one happening now, or starting within 15
+// minutes, can be joined and recorded. Later is the rest of today. Tomorrow
+// is the next day. A row can be prepped. It does not start a recording.
+// Once a brief exists, Brief replaces Prep and opens the note. Brief's
+// chevron preps again, and that Brief control shows Preparing while the
+// new note is written. Closing the card keeps that state. Another meeting
+// can be prepped at the same time. If HEY cannot be reached, OmaCal still lists those
+// two days, without Prep.
 // History turns the body over to recent recordings. Play plays one recording
 // in the card. Transcript and Insights open the note, and the next link is
 // not stuck behind the first. After a take finishes, the saved default action
@@ -42,6 +47,8 @@ BarWidget {
   property string daySource: ""
   property var dayEvents: []
   property var laterEvents: []
+  property var tomorrowEvents: []
+  property string offerBrief: ""
   property string briefUrl: ""
   property bool showingHistory: false
   property var recentMeetings: []
@@ -60,11 +67,12 @@ BarWidget {
   property int audioRunSerial: 0
   property string audioText: ""
   property bool audioBusy: false
-  property bool preparing: false
-  property int prepSerial: 0
-  property int prepRunSerial: 0
-  property string prepId: ""
-  property string prepOutput: ""
+  property var preparingIds: []
+  property var preparingBriefs: ({})
+  property var prepResults: ({})
+  property int prepGeneration: 0
+  property bool prepSawFailure: false
+  readonly property bool preparing: preparingIds.length > 0
   property int daySerial: 0
   property string captureTitle: ""
   property int latestTries: 0
@@ -79,6 +87,7 @@ BarWidget {
   property bool queryOffer: false
   property bool queryLatest: false
   property bool menuOpen: false
+  property string briefMenuId: ""
 
   readonly property string defaultAction: {
     if (actions.length === 0) return ""
@@ -99,16 +108,14 @@ BarWidget {
                               || recorderState === "stopping" || recorderState === "transcribing"
   readonly property bool pending: pendingFolder !== ""
   readonly property bool ready: recorderState === "off" || recorderState === "idle" || recorderState === "done"
-  readonly property bool canFlip: ready && !starting && !acting && !pending
+  // A transcription still has a free window. A live or saving take does not.
+  readonly property bool canStart: (ready || recorderState === "transcribing") && !starting && !acting
+  readonly property bool canFlip: true
   property bool flipSnap: false
-  onCanFlipChanged: {
-    if (!root.canFlip) {
-      root.flipSnap = true
-      root.showingHistory = false
-      Qt.callLater(function() { root.flipSnap = false })
-    }
+  onShowingHistoryChanged: {
+    if (root.showingHistory) root.briefMenuId = ""
+    if (root.showingHistory && root.panelOpen) root.refreshRecent()
   }
-  onShowingHistoryChanged: if (root.showingHistory && root.panelOpen) root.refreshRecent()
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property color recordColor: Color.urgent
   property bool panelOpen: false
@@ -136,9 +143,8 @@ BarWidget {
     if (pending && ready && pendingTitle) return pendingTitle
     return ""
   }
-  readonly property bool offerVisible: ready && !starting && !acting && !pending && offerTitle !== ""
-  readonly property bool scheduleVisible: ready && !starting && !acting && !pending
-                                         && (offerVisible || laterEvents.length > 0 || briefUrl !== "")
+  readonly property bool offerVisible: offerTitle !== ""
+  readonly property bool scheduleVisible: offerVisible || laterEvents.length > 0 || tomorrowEvents.length > 0 || briefUrl !== ""
   readonly property string tooltip: {
     if (recorderState === "recording") return "Recording · " + clock(elapsed) + (title ? " · " + title : "")
     if (recorderState === "paused") return "Paused · " + clock(elapsed) + (title ? " · " + title : "")
@@ -183,7 +189,14 @@ BarWidget {
     root.recorderState = next
     var wasLive = prev === "recording" || prev === "paused" || prev === "stopping" || prev === "transcribing"
     var nowLive = next === "recording" || next === "paused" || next === "stopping" || next === "transcribing"
-    if (!wasLive && nowLive) root.stopClip()
+    if (!wasLive && nowLive) {
+      root.stopClip()
+      if (root.showingHistory) {
+        root.flipSnap = true
+        root.showingHistory = false
+        Qt.callLater(function() { root.flipSnap = false })
+      }
+    }
     if (wasLive && !nowLive) root.armedTitle = ""
     if (next === "recording" && root.statusLine === "Couldn't open the meeting link")
       root.statusLine = ""
@@ -206,10 +219,8 @@ BarWidget {
 
   function close() {
     root.stopClip()
-    root.prepSerial += 1
     root.recentSerial += 1
     root.pieceSerial += 1
-    root.preparing = false
     root.flipSnap = true
     root.panelOpen = false
     root.showingHistory = false
@@ -224,10 +235,18 @@ BarWidget {
     root.offerUrl = ""
     root.offerId = ""
     root.offerHasUrl = false
+    root.offerBrief = ""
     root.daySource = ""
     root.dayEvents = []
     root.laterEvents = []
+    root.tomorrowEvents = []
     root.briefUrl = ""
+    root.briefMenuId = ""
+  }
+
+  function toggleBriefMenu(id) {
+    if (!id) return
+    root.briefMenuId = root.briefMenuId === id ? "" : id
   }
 
   function toggle() {
@@ -295,7 +314,7 @@ BarWidget {
   }
 
   function startRecording(name) {
-    if (root.starting || root.acting) return
+    if (!root.canStart) return
     root.stopClip()
     var notice = root.statusLine
     root.armedTitle = name || ""
@@ -322,7 +341,7 @@ BarWidget {
   }
 
   function joinOffer() {
-    if (root.starting || root.acting || root.preparing || !root.ready || !root.offerTitle) return
+    if (!root.canStart || !root.offerTitle) return
     var title = root.offerTitle
     if (root.daySource === "hey") {
       if (!root.offerHasUrl || !root.offerId) {
@@ -367,7 +386,7 @@ BarWidget {
   }
 
   function refreshDay() {
-    if (!root.panelOpen || !root.ready) return
+    if (!root.panelOpen) return
     root.daySerial += 1
     root.queryOffer = false
     root.queryDay = true
@@ -375,14 +394,53 @@ BarWidget {
   }
 
   function refreshAgenda() {
-    if (!root.panelOpen || !root.ready || root.daySource === "hey") return
+    if (!root.panelOpen || root.daySource === "hey") return
     root.queryOffer = true
     root.pumpQuery()
   }
 
+  function localDay(offset) {
+    var when = new Date()
+    when.setDate(when.getDate() + (offset || 0))
+    var month = when.getMonth() + 1
+    var day = when.getDate()
+    return when.getFullYear() + "-"
+      + (month < 10 ? "0" : "") + month + "-"
+      + (day < 10 ? "0" : "") + day
+  }
+
+  function cleanEvents(events) {
+    var cleaned = []
+    var count = events && events.length !== undefined ? events.length : 0
+    for (var i = 0; i < count; i++) {
+      var ev = events[i]
+      if (!ev) continue
+      var title = typeof ev.title === "string" ? ev.title.trim() : ""
+      var start = Number(ev.start)
+      var end = Number(ev.end)
+      if (!title || !isFinite(start) || !isFinite(end)) continue
+      var date = typeof ev.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(ev.date) ? ev.date : ""
+      var brief = typeof ev.brief === "string" && ev.brief.indexOf("obsidian://open?") === 0 ? ev.brief : ""
+      var url = typeof ev.url === "string" ? ev.url : ""
+      if (url.indexOf("https://") !== 0 && url.indexOf("http://") !== 0) url = ""
+      cleaned.push({
+        id: String(ev.id || ""),
+        title: title.slice(0, root.maxTitleLength),
+        when: typeof ev.when === "string" ? ev.when.slice(0, 40) : "",
+        start: start,
+        end: end,
+        date: date,
+        hasUrl: ev.hasUrl === true || url !== "",
+        url: url.slice(0, 2000),
+        brief: brief
+      })
+    }
+    return cleaned
+  }
+
   function pickOffer() {
-    if (root.daySource !== "hey") return
     var now = Date.now()
+    var today = root.localDay(0)
     var windowMs = 15 * 60 * 1000
     var events = root.dayEvents || []
     var current = []
@@ -411,116 +469,251 @@ BarWidget {
       root.offerTitle = String(chosen.title || "").slice(0, root.maxTitleLength)
       root.offerWhen = String(chosen.when || "").slice(0, 40)
       root.offerHasUrl = chosen.hasUrl === true
-      root.offerUrl = ""
+      root.offerUrl = typeof chosen.url === "string" ? chosen.url : ""
+      root.offerBrief = typeof chosen.brief === "string" ? chosen.brief : ""
     } else {
       root.offerId = ""
       root.offerTitle = ""
       root.offerWhen = ""
       root.offerHasUrl = false
       root.offerUrl = ""
+      root.offerBrief = ""
     }
     rest.sort(function(a, b) { return a.start - b.start })
-    var rows = []
+    var later = []
+    var tomorrow = []
     for (var j = 0; j < rest.length; j++) {
-      if (chosen && rest[j].id === chosen.id) continue
-      rows.push(rest[j])
-      if (rows.length >= 4) break
+      if (rest[j] === chosen) continue
+      if (chosen && chosen.id && rest[j].id === chosen.id) continue
+      var bucket = rest[j].date === today ? later : tomorrow
+      if (bucket.length >= 4) continue
+      bucket.push(rest[j])
     }
-    root.laterEvents = rows
+    root.laterEvents = later
+    root.tomorrowEvents = tomorrow
+  }
+
+  function isPreparing(id) {
+    if (!id) return false
+    var ids = root.preparingIds || []
+    for (var i = 0; i < ids.length; i++) {
+      if (ids[i] === id) return true
+    }
+    return false
+  }
+
+  function markPreparing(id) {
+    if (!id || root.isPreparing(id)) return false
+    var ids = []
+    var current = root.preparingIds || []
+    for (var i = 0; i < current.length; i++) ids.push(current[i])
+    ids.push(id)
+    var held = ""
+    var events = root.dayEvents || []
+    for (var n = 0; n < events.length; n++) {
+      var old = events[n]
+      if (!old || old.id !== id || typeof old.brief !== "string") continue
+      if (old.brief.indexOf("obsidian://open?") === 0) held = old.brief
+    }
+    var briefs = {}
+    var previous = root.preparingBriefs || {}
+    for (var key in previous) briefs[key] = previous[key]
+    if (held) briefs[id] = held
+    root.preparingBriefs = briefs
+    root.preparingIds = ids
+    root.prepGeneration += 1
+    return true
+  }
+
+  function unmarkPreparing(id) {
+    var current = root.preparingIds || []
+    var ids = []
+    for (var i = 0; i < current.length; i++) {
+      if (current[i] !== id) ids.push(current[i])
+    }
+    var briefs = {}
+    var previous = root.preparingBriefs || {}
+    for (var key in previous) {
+      if (key !== id) briefs[key] = previous[key]
+    }
+    root.preparingBriefs = briefs
+    root.preparingIds = ids
+    root.prepGeneration += 1
+  }
+
+  function preparingBrief(id) {
+    var saved = root.preparingBriefs || {}
+    var brief = saved[id]
+    if (typeof brief === "string" && brief.indexOf("obsidian://open?") === 0) return brief
+    return ""
+  }
+
+  function keepPreparingBrief(events) {
+    if (!root.preparing) return events
+    var next = []
+    for (var j = 0; j < events.length; j++) {
+      var ev = events[j]
+      if (!ev || !root.isPreparing(ev.id) || (ev.brief && ev.brief.indexOf("obsidian://open?") === 0)) {
+        next.push(ev)
+        continue
+      }
+      var previous = root.preparingBrief(ev.id)
+      if (!previous) {
+        next.push(ev)
+        continue
+      }
+      next.push({
+        id: ev.id,
+        title: ev.title,
+        when: ev.when,
+        start: ev.start,
+        end: ev.end,
+        date: ev.date || "",
+        hasUrl: ev.hasUrl === true,
+        url: ev.url || "",
+        brief: previous
+      })
+    }
+    return next
   }
 
   function dayReady(code, text) {
-    if (!root.ready) return
     var line = String(text || "").trim().split("\n")[0] || ""
     if (!line) return
     var data
     try { data = JSON.parse(line) } catch (e) { return }
     if (!data || (data.source !== "hey" && data.source !== "omacal")) return
-    if (data.source === "hey") {
-      var events = data.events || []
-      var cleaned = []
-      var count = events.length !== undefined ? events.length : 8
-      for (var i = 0; i < count; i++) {
-        var ev = events[i]
-        if (!ev) break
-        var title = typeof ev.title === "string" ? ev.title.trim() : ""
-        var start = Number(ev.start)
-        var end = Number(ev.end)
-        if (!title || !isFinite(start) || !isFinite(end)) continue
-        cleaned.push({
-          id: String(ev.id || ""),
-          title: title.slice(0, root.maxTitleLength),
-          when: typeof ev.when === "string" ? ev.when.slice(0, 40) : "",
-          start: start,
-          end: end,
-          hasUrl: ev.hasUrl === true
-        })
-      }
-      root.daySource = "hey"
-      root.dayEvents = cleaned
-      root.pickOffer()
-      return
-    }
-    root.daySource = "omacal"
-    root.dayEvents = []
-    root.laterEvents = []
-    root.offerId = ""
-    root.offerHasUrl = false
-    root.applyOffer(data.offer || null)
-  }
-
-  function applyOffer(data) {
-    if (!data) {
-      root.offerTitle = ""
-      root.offerWhen = ""
-      root.offerUrl = ""
-      return
-    }
-    var title = typeof data.title === "string" ? data.title.trim() : ""
-    var url = typeof data.url === "string" ? data.url : ""
-    if (url.indexOf("https://") !== 0 && url.indexOf("http://") !== 0) url = ""
-    root.offerTitle = title.slice(0, root.maxTitleLength)
-    root.offerWhen = typeof data.when === "string" ? data.when.slice(0, 40) : ""
-    root.offerUrl = url.slice(0, 2000)
+    root.daySource = data.source
+    root.dayEvents = root.applyPrepResults(root.keepPreparingBrief(root.cleanEvents(data.events || [])))
+    root.pickOffer()
   }
 
   function offerReady(code, text) {
-    if (!root.ready || root.daySource === "hey") return
+    if (root.daySource === "hey") return
     var line = String(text || "").trim().split("\n")[0] || ""
-    if (!line) {
-      root.applyOffer(null)
-      return
-    }
-    var data
-    try { data = JSON.parse(line) } catch (e) {
-      root.applyOffer(null)
-      return
+    var data = null
+    if (line) {
+      try { data = JSON.parse(line) } catch (e) { data = null }
     }
     root.daySource = "omacal"
-    root.dayEvents = []
-    root.laterEvents = []
-    root.offerId = ""
-    root.offerHasUrl = false
-    root.applyOffer(data)
+    root.dayEvents = root.cleanEvents(data && data.events ? data.events : [])
+    root.pickOffer()
   }
 
   function prepare(id) {
-    if (!id || root.preparing || prepProc.running || root.acting || root.starting || !root.ready) return
-    root.prepSerial += 1
-    root.prepRunSerial = root.prepSerial
-    root.preparing = true
+    root.briefMenuId = ""
+    if (!id || root.isPreparing(id)) return
+    if (!root.markPreparing(id)) return
     root.briefUrl = ""
     root.statusLine = "Preparing…"
-    root.prepOutput = ""
-    root.prepId = id
-    Qt.callLater(function() { if (!prepProc.running) prepProc.running = true })
+    var job = prepJob.createObject(root, { prepKey: id })
+    if (!job) {
+      root.unmarkPreparing(id)
+      if (!root.preparing) root.statusLine = "Couldn't prepare that meeting"
+      return
+    }
+    Qt.callLater(function() {
+      if (!job) return
+      job.command = [root.helper, "prep", id]
+      if (!job.running) job.running = true
+    })
   }
 
-  function openBrief() {
-    if (!root.briefUrl || root.briefUrl.indexOf("obsidian://open?") !== 0) return
-    root.runControl(["open-note", root.briefUrl], function(code) {
+  function notePrepResult(id, url) {
+    var saved = {}
+    var previous = root.prepResults || {}
+    for (var key in previous) saved[key] = previous[key]
+    saved[id] = url
+    root.prepResults = saved
+    if ((root.dayEvents || []).length) root.rememberBrief(id, url)
+  }
+
+  function applyPrepResults(events) {
+    var saved = root.prepResults || {}
+    var remain = {}
+    for (var key in saved) remain[key] = saved[key]
+    var next = []
+    var changed = false
+    for (var i = 0; i < events.length; i++) {
+      var ev = events[i]
+      if (!ev || typeof saved[ev.id] !== "string") {
+        next.push(ev)
+        continue
+      }
+      changed = true
+      delete remain[ev.id]
+      var brief = saved[ev.id].indexOf("obsidian://open?") === 0 ? saved[ev.id] : ""
+      if (brief) root.briefUrl = brief
+      next.push({
+        id: ev.id,
+        title: ev.title,
+        when: ev.when,
+        start: ev.start,
+        end: ev.end,
+        date: ev.date || "",
+        hasUrl: ev.hasUrl === true,
+        url: ev.url || "",
+        brief: brief
+      })
+    }
+    if (changed) root.prepResults = remain
+    return next
+  }
+
+  function finishPrep(id, code, text) {
+    var lines = String(text || "").trim().split("\n")
+    var last = lines.length ? lines[lines.length - 1] : ""
+    var removed = false
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].trim() === "replaced") removed = true
+    }
+    var ok = code === 0 && last.indexOf("ready obsidian://open?") === 0
+    if (ok) root.notePrepResult(id, last.slice(6).trim())
+    else if (removed) root.notePrepResult(id, "")
+    if (!ok) root.prepSawFailure = true
+    root.unmarkPreparing(id)
+    if (root.preparing) {
+      root.statusLine = "Preparing…"
+      return
+    }
+    if (root.prepSawFailure) root.statusLine = "Couldn't prepare that meeting"
+    else if (root.statusLine === "Preparing…") root.statusLine = ""
+    root.prepSawFailure = false
+  }
+
+  function openBrief(url) {
+    root.briefMenuId = ""
+    if (!url || url.indexOf("obsidian://open?") !== 0) return
+    root.runControl(["open-note", url], function(code) {
       if (code !== 0) root.statusLine = "Couldn't open the brief"
     })
+  }
+
+  function rememberBrief(id, url) {
+    var events = root.dayEvents || []
+    var next = []
+    for (var i = 0; i < events.length; i++) {
+      var ev = events[i]
+      if (!ev) continue
+      if (ev.id !== id) {
+        next.push(ev)
+        continue
+      }
+      next.push({
+        id: ev.id,
+        title: ev.title,
+        when: ev.when,
+        start: ev.start,
+        end: ev.end,
+        date: ev.date || "",
+        hasUrl: ev.hasUrl === true,
+        url: ev.url || "",
+        brief: url
+      })
+    }
+    root.dayEvents = next
+    root.briefUrl = url
+    root.pickOffer()
   }
 
   function refreshRecent() {
@@ -742,7 +935,7 @@ BarWidget {
     id: offerTimer
     interval: 60000
     repeat: true
-    running: root.panelOpen && root.ready && !root.starting && !root.pending
+    running: root.panelOpen
     onTriggered: {
       if (root.daySource === "hey") root.pickOffer()
       else root.refreshAgenda()
@@ -824,24 +1017,19 @@ BarWidget {
     }
   }
 
-  Process {
-    id: prepProc
-    command: [root.helper, "prep", root.prepId]
-    stdout: SplitParser { onRead: function(line) { root.prepOutput += line + "\n" } }
-    onExited: function(code) {
-      var serial = root.prepRunSerial
-      var text = root.prepOutput
-      root.prepOutput = ""
-      if (serial !== root.prepSerial) return
-      root.preparing = false
-      var lines = String(text || "").trim().split("\n")
-      var last = lines.length ? lines[lines.length - 1] : ""
-      if (code === 0 && last.indexOf("ready obsidian://open?") === 0) {
-        root.briefUrl = last.slice(6).trim()
-        root.statusLine = ""
-      } else {
-        root.briefUrl = ""
-        root.statusLine = "Couldn't prepare that meeting"
+  Component {
+    id: prepJob
+    Process {
+      id: job
+      property string prepKey: ""
+      property string output: ""
+      command: [root.helper, "prep", prepKey]
+      stdout: SplitParser { onRead: function(line) { job.output += line + "\n" } }
+      onExited: function(code) {
+        var key = job.prepKey
+        var text = job.output
+        root.finishPrep(key, code, text)
+        Qt.callLater(function() { job.destroy() })
       }
     }
   }
@@ -969,7 +1157,10 @@ BarWidget {
     owner: root
     bar: root.bar
     open: root.opened
-    onOpenChanged: if (!open) root.menuOpen = false
+    onOpenChanged: if (!open) {
+      root.menuOpen = false
+      root.briefMenuId = ""
+    }
     centerOnBar: false
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360))
@@ -981,9 +1172,18 @@ BarWidget {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Column {
-        id: column
-        width: parent.width
+      Flickable {
+        id: cardScroll
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        interactive: contentHeight > height
+
+        Column {
+          id: column
+          width: cardScroll.width
         spacing: Style.space(12)
 
         Item {
@@ -1148,37 +1348,20 @@ BarWidget {
           spacing: Style.space(8)
           visible: root.scheduleVisible
 
-          Item {
-            width: parent.width
+          MeetingRow {
             visible: root.offerVisible
-            implicitHeight: Math.max(offerCaption.implicitHeight, offerPrep.implicitHeight)
-
-            Text {
-              id: offerCaption
-              anchors.left: parent.left
-              anchors.right: offerPrep.left
-              anchors.rightMargin: offerPrep.visible ? Style.space(8) : 0
-              anchors.verticalCenter: parent.verticalCenter
-              textFormat: Text.PlainText
-              text: root.offerWhen ? root.offerWhen + "  " + root.offerTitle : root.offerTitle
-              elide: Text.ElideRight
-              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.72)
-              font.family: root.faceFont
-              font.pixelSize: Style.font.caption
-            }
-
-            Button {
-              id: offerPrep
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              visible: root.daySource === "hey" && root.offerId !== ""
-              width: visible ? implicitWidth : 0
-              text: "Prep"
-              foreground: root.foreground
-              fontFamily: root.faceFont
-              enabled: !root.preparing && !root.starting && !root.acting
-              onClicked: root.prepare(root.offerId)
-            }
+            modelData: null
+            foreground: root.foreground
+            fontFamily: root.faceFont
+            label: root.offerWhen ? root.offerWhen + "  " + root.offerTitle : root.offerTitle
+            eventId: root.daySource === "hey" ? root.offerId : ""
+            noteUrl: root.offerBrief
+            preparing: root.prepGeneration >= 0 && root.isPreparing(eventId)
+            busy: root.starting || root.acting
+            menuOpen: eventId !== "" && root.briefMenuId === eventId
+            onOpenRequested: root.openBrief(noteUrl)
+            onPrepRequested: root.prepare(eventId)
+            onMenuToggled: root.toggleBriefMenu(eventId)
           }
 
           Button {
@@ -1190,13 +1373,13 @@ BarWidget {
                   : "Record this meeting"
             foreground: root.foreground
             fontFamily: root.faceFont
-            enabled: !root.starting && !root.acting && !root.preparing
+            enabled: root.canStart
             onClicked: root.joinOffer()
           }
 
           Text {
             width: parent.width
-            visible: root.offerVisible && root.laterEvents.length > 0
+            visible: root.laterEvents.length > 0
             textFormat: Text.PlainText
             text: "Later"
             color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.62)
@@ -1207,35 +1390,46 @@ BarWidget {
           Repeater {
             model: root.laterEvents
 
-            delegate: Item {
-              required property var modelData
-              width: parent.width
-              implicitHeight: Math.max(laterCaption.implicitHeight, laterPrep.implicitHeight)
+            delegate: MeetingRow {
+              foreground: root.foreground
+              fontFamily: root.faceFont
+              label: modelData && modelData.when ? modelData.when + "  " + modelData.title : (modelData ? modelData.title : "")
+              eventId: modelData && modelData.id ? String(modelData.id) : ""
+              noteUrl: modelData && modelData.brief ? String(modelData.brief) : ""
+              preparing: root.prepGeneration >= 0 && root.isPreparing(eventId)
+              busy: root.starting || root.acting
+              menuOpen: eventId !== "" && root.briefMenuId === eventId
+              onOpenRequested: root.openBrief(noteUrl)
+              onPrepRequested: root.prepare(eventId)
+              onMenuToggled: root.toggleBriefMenu(eventId)
+            }
+          }
 
-              Text {
-                id: laterCaption
-                anchors.left: parent.left
-                anchors.right: laterPrep.left
-                anchors.rightMargin: Style.space(8)
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: modelData.when ? modelData.when + "  " + modelData.title : modelData.title
-                elide: Text.ElideRight
-                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.72)
-                font.family: root.faceFont
-                font.pixelSize: Style.font.caption
-              }
+          Text {
+            width: parent.width
+            visible: root.tomorrowEvents.length > 0
+            textFormat: Text.PlainText
+            text: "Tomorrow"
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.62)
+            font.family: root.faceFont
+            font.pixelSize: Style.font.caption
+          }
 
-              Button {
-                id: laterPrep
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Prep"
-                foreground: root.foreground
-                fontFamily: root.faceFont
-                enabled: !root.preparing && !root.starting && !root.acting && modelData.id !== ""
-                onClicked: root.prepare(modelData.id)
-              }
+          Repeater {
+            model: root.tomorrowEvents
+
+            delegate: MeetingRow {
+              foreground: root.foreground
+              fontFamily: root.faceFont
+              label: modelData && modelData.when ? modelData.when + "  " + modelData.title : (modelData ? modelData.title : "")
+              eventId: modelData && modelData.id ? String(modelData.id) : ""
+              noteUrl: modelData && modelData.brief ? String(modelData.brief) : ""
+              preparing: root.prepGeneration >= 0 && root.isPreparing(eventId)
+              busy: root.starting || root.acting
+              menuOpen: eventId !== "" && root.briefMenuId === eventId
+              onOpenRequested: root.openBrief(noteUrl)
+              onPrepRequested: root.prepare(eventId)
+              onMenuToggled: root.toggleBriefMenu(eventId)
             }
           }
 
@@ -1246,8 +1440,8 @@ BarWidget {
             text: "Open brief"
             foreground: root.foreground
             fontFamily: root.faceFont
-            enabled: !root.starting && !root.acting && !root.preparing
-            onClicked: root.openBrief()
+            enabled: !root.starting && !root.acting
+            onClicked: root.openBrief(root.briefUrl)
           }
         }
 
@@ -1259,7 +1453,7 @@ BarWidget {
           WordButton {
             width: (transport.width - transport.spacing * 3) / 4
             text: "Record"
-            live: root.ready && !root.starting && !root.acting
+            live: root.canStart
             strong: true
             onClicked: root.startRecording("")
           }
@@ -1630,6 +1824,7 @@ BarWidget {
               }
             }
           }
+        }
         }
         }
       }
