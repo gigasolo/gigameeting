@@ -102,6 +102,10 @@ Removal leaves the default-action file in place. Delete `~/.local/state/omarchy/
 sudo pacman -R omarchy-meeting-recorder-bin
 ```
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Tomorrow, source links in a brief, and keeping the list up while recording are unreleased. The manifest version stays 1.1.0 until the next release.
+
 ## Marketplace
 
 The shell lists this plugin under Audio. On the [Omarchy plugin marketplace](https://plugins.omarchy.org/publish.html) form, the category is Productivity and the tags are Bar and Quickshell.
