@@ -256,8 +256,18 @@ cmd_run() {
   "$recorder" action "$name" "$real"
 }
 
+cmd_run_meeting() {
+  local name=$1 id=$2 folder
+  [[ -n $name && -n $id ]] || { echo "missing meeting folder"; return 1; }
+  if ! folder=$(python3 "$calendar" folder "$id"); then
+    printf '%s\n' "$folder"
+    return 1
+  fi
+  cmd_run "$name" "$folder"
+}
+
 usage() {
-  echo "Usage: meeting-bar start [title]|pause|stop|open <url>|day|agenda|open-event <id>|prep <id>|open-note <url>|recent|open-recent <id> <kind>|audio <id>|actions|latest [title]|run <name> <folder>" >&2
+  echo "Usage: meeting-bar start [title]|pause|stop|open <url>|day|agenda|open-event <id>|prep <id>|open-note <url>|recent|open-recent <id> <kind>|audio <id>|actions|latest [title]|run <name> <folder>|run-meeting <name> <id>" >&2
   return 2
 }
 
@@ -277,5 +287,6 @@ case ${1:-} in
   actions) cmd_actions ;;
   latest) cmd_latest "${2:-}" ;;
   run) cmd_run "${2:-}" "${3:-}" ;;
+  run-meeting) cmd_run_meeting "${2:-}" "${3:-}" ;;
   *) usage ;;
 esac

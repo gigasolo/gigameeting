@@ -61,10 +61,10 @@ Click the icon to open the card. Click it again to close. The icon never starts 
 | **Join and record** | A timed event is happening, or starts within 15 minutes. The recording takes the event's name. All-day events are skipped. It follows the same rule as Record. |
 | **Later** | The other timed meetings today, then tomorrow under Tomorrow, a few rows each, clock and title. The list stays up during a recording, a transcription, a prep, and an action. A row does not start a recording. |
 | **Prep** | Writes a short brief in the vault from that invite and past notes with the same title, or that name the same people. A past meeting is a sentence or two plus a link to that insight or transcript. Earlier prep notes are left out. A join link is not treated as a description. The note uses that meeting's own date. When that note exists, Brief replaces Prep and opens it. The chevron on Brief preps again: the old note is removed, a new one is written, and Brief shows Preparing while that runs. Closing the card leaves Preparing in place. Other meetings can be prepped at the same time. Open brief under the list opens the one just written. Nothing is sent. |
-| **History** | Turns the card over to recent recordings, grouped by day. Play plays that recording in the card. Transcript and Insights open the note, and the next link still works. Today turns it back. A row does not start a recording. |
+| **History** | Turns the card over to recent recordings, grouped by day. Play plays that recording in the card. A row says Recorded until there is a transcript, and Transcribed until that note is in Obsidian. Transcript and Insights open the vault notes. Save on that row runs the default action until both notes are filed, and the caret runs another action or sets the default. Today turns the card back. A row does not start a recording. |
 | **Pause** | Holds the take. Resume continues it. |
 | **Stop** | Saves the recording and transcribes it. |
-| **The action** | After a take this card watched finish, your Meeting Recorder action is the button. The chevron runs another action, or sets the default. Nothing runs by itself. |
+| **The action** | Save lives on the History row once a transcript exists and the notes are not both in Obsidian yet. Nothing runs by itself. Today does not keep the last meeting's action up after the recorder is done. |
 
 Actions are read from `~/.config/omarchy-meeting-recorder/config.toml` each time the card needs them. Meeting Recorder has no action editor. Change the file, and the next open picks it up.
 
@@ -104,7 +104,7 @@ sudo pacman -R omarchy-meeting-recorder-bin
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md). Tomorrow, source links in a brief, and keeping the list up while recording are unreleased. The manifest version stays 1.1.0 until the next release.
+See [CHANGELOG.md](CHANGELOG.md). Tomorrow, source links in a brief, keeping the list up while recording, and filing status on History are unreleased. The manifest version stays 1.1.0 until the next release.
 
 ## Marketplace
 

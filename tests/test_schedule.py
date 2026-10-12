@@ -8,7 +8,9 @@ then shadows the stdlib calendar module that datetime imports.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -447,6 +449,69 @@ class ScheduleTests(unittest.TestCase):
         }
         found = self.mod.find_past(event)
         self.assertEqual([path.name for path, _why in found], [prior.name])
+
+    def _recording(self, name: str) -> Path:
+        root = Path(os.environ["MEETINGS_ROOT"])
+        root.mkdir(parents=True, exist_ok=True)
+        folder = root / name
+        folder.mkdir()
+        return folder
+
+    def test_a_local_transcript_is_not_a_vault_note(self) -> None:
+        folder = self._recording("202610041200 Alignment")
+        (folder / "audio.ogg").write_bytes(b"ogg")
+        recorded = self.mod.describe_meeting(folder)
+        self.assertEqual(
+            (recorded["recording"], recorded["transcribed"], recorded["transcript"], recorded["insights"]),
+            (True, False, False, False),
+        )
+
+        (folder / "transcript.md").write_text("hello\n", encoding="utf-8")
+        (folder / ".obsidian-filed.json").write_text(
+            json.dumps({"transcript_rel": "Meetings/missing.md", "insights_rel": "Meetings/missing — Insights.md"}),
+            encoding="utf-8",
+        )
+        local = self.mod.describe_meeting(folder)
+        self.assertTrue(local["transcribed"])
+        self.assertFalse(local["transcript"])
+        self.assertFalse(local["insights"])
+
+        note = self.vault / "Meetings" / "2026-10-04 Alignment.md"
+        insights = self.vault / "Meetings" / "2026-10-04 Alignment — Insights.md"
+        note.write_text("# Alignment\n", encoding="utf-8")
+        insights.write_text("# Insights\n", encoding="utf-8")
+        (folder / ".obsidian-filed.json").write_text(
+            json.dumps({
+                "transcript_rel": "Meetings/2026-10-04 Alignment.md",
+                "insights_rel": "Meetings/2026-10-04 Alignment — Insights.md",
+            }),
+            encoding="utf-8",
+        )
+        filed = self.mod.describe_meeting(folder)
+        self.assertTrue(filed["transcript"])
+        self.assertTrue(filed["insights"])
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.mod.cmd_recent()
+        row = json.loads(buf.getvalue())["meetings"][0]
+        self.assertEqual(row["id"], folder.name)
+        self.assertTrue(row["transcribed"])
+        self.assertTrue(row["transcript"])
+        self.assertTrue(row["insights"])
+
+    def test_folder_command_stays_inside_the_meetings_directory(self) -> None:
+        folder = self._recording("202610041200 Alignment")
+        (folder / "audio.ogg").write_bytes(b"ogg")
+        with self.assertRaises(SystemExit):
+            self.mod.cmd_folder(folder.name)
+        (folder / "transcript.md").write_text("hello\n", encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.mod.cmd_folder(folder.name)
+        self.assertEqual(Path(buf.getvalue().strip()), folder.resolve())
+        with self.assertRaises(SystemExit):
+            self.mod.cmd_folder("../" + folder.name)
 
 
 if __name__ == "__main__":

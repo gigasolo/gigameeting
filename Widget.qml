@@ -16,9 +16,10 @@ import qs.Ui
 // can be prepped at the same time. If HEY cannot be reached, OmaCal still lists those
 // two days, without Prep.
 // History turns the body over to recent recordings. Play plays one recording
-// in the card. Transcript and Insights open the note, and the next link is
-// not stuck behind the first. After a take finishes, the saved default action
-// is the button; the menu runs another action or changes the default. The
+// in the card. A row says Recorded or Transcribed until the notes are in
+// Obsidian. Transcript and Insights open those notes. Save on that row runs
+// the default action until both notes are filed, and its caret runs another
+// action or changes the default. Today does not keep that action up. The
 // card closes from the bar icon.
 BarWidget {
   id: root
@@ -36,8 +37,6 @@ BarWidget {
   property real progress: 0
   property string title: ""
 
-  property string pendingFolder: ""
-  property string pendingTitle: ""
   property string armedTitle: ""
   property string offerTitle: ""
   property string offerWhen: ""
@@ -74,20 +73,18 @@ BarWidget {
   property bool prepSawFailure: false
   readonly property bool preparing: preparingIds.length > 0
   property int daySerial: 0
-  property string captureTitle: ""
-  property int latestTries: 0
   property string statusLine: ""
   property bool starting: false
   property bool acting: false
+  property string actingId: ""
   property var actions: []
   property string savedDefault: ""
   property bool queryBusy: false
   property bool queryActions: false
   property bool queryDay: false
   property bool queryOffer: false
-  property bool queryLatest: false
-  property bool menuOpen: false
   property string briefMenuId: ""
+  property string actionMenuId: ""
 
   readonly property string defaultAction: {
     if (actions.length === 0) return ""
@@ -106,7 +103,6 @@ BarWidget {
 
   readonly property bool live: recorderState === "recording" || recorderState === "paused"
                               || recorderState === "stopping" || recorderState === "transcribing"
-  readonly property bool pending: pendingFolder !== ""
   readonly property bool ready: recorderState === "off" || recorderState === "idle" || recorderState === "done"
   // A transcription still has a free window. A live or saving take does not.
   readonly property bool canStart: (ready || recorderState === "transcribing") && !starting && !acting
@@ -114,6 +110,7 @@ BarWidget {
   property bool flipSnap: false
   onShowingHistoryChanged: {
     if (root.showingHistory) root.briefMenuId = ""
+    else root.actionMenuId = ""
     if (root.showingHistory && root.panelOpen) root.refreshRecent()
   }
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
@@ -140,7 +137,6 @@ BarWidget {
   readonly property string meetingLabel: {
     if (live && armedTitle) return armedTitle
     if (live && title) return title
-    if (pending && ready && pendingTitle) return pendingTitle
     return ""
   }
   readonly property bool offerVisible: offerTitle !== ""
@@ -206,7 +202,7 @@ BarWidget {
 
     if (next === "done" && prev !== "done"
         && (prev === "transcribing" || prev === "stopping" || prev === "recording" || prev === "paused")) {
-      root.captureDone()
+      if (root.panelOpen) root.refreshRecent()
     }
   }
 
@@ -242,6 +238,7 @@ BarWidget {
     root.tomorrowEvents = []
     root.briefUrl = ""
     root.briefMenuId = ""
+    root.actionMenuId = ""
   }
 
   function toggleBriefMenu(id) {
@@ -299,10 +296,6 @@ BarWidget {
         if (offerSerial !== root.daySerial || root.daySource === "hey") return
         root.offerReady(code, text)
       }
-    } else if (root.queryLatest) {
-      root.queryLatest = false
-      args = ["latest", root.captureTitle]
-      done = function(code, text) { root.latestReady(code, text) }
     } else {
       return
     }
@@ -752,6 +745,7 @@ BarWidget {
         day: day.slice(0, 32),
         time: time.slice(0, 8),
         recording: row.recording === true,
+        transcribed: row.transcribed === true,
         transcript: row.transcript === true,
         insights: row.insights === true
       })
@@ -852,46 +846,28 @@ BarWidget {
     root.actions = names
   }
 
-  function captureDone() {
-    root.captureTitle = root.title
-    root.latestTries = 0
-    root.pendingFolder = ""
-    root.resolveLatest()
-  }
-
-  function resolveLatest() {
-    root.queryLatest = true
-    root.pumpQuery()
-  }
-
-  function latestReady(code, text) {
-    var path = String(text || "").trim().split("\n")[0] || ""
-    if (path) {
-      root.pendingFolder = path
-      root.pendingTitle = root.captureTitle || root.title
-      return
-    }
-    root.latestTries += 1
-    if (root.latestTries < 8) latestTimer.restart()
-    else root.statusLine = "Couldn't find the meeting folder"
-  }
-
-  function runAction(name) {
-    if (!root.pendingFolder || root.acting) return
+  function runAction(name, id) {
+    if (!name || !id || root.acting) return
     root.acting = true
+    root.actingId = id
+    root.actionMenuId = ""
     root.statusLine = "Running " + name + "…"
-    root.runControl(["run", name, root.pendingFolder], function(code, text) {
+    if (!root.runControl(["run-meeting", name, id], function(code, text) {
       root.acting = false
+      root.actingId = ""
       var lines = String(text || "").trim().split("\n")
       var last = lines.length ? lines[lines.length - 1] : ""
       if (code === 0) {
-        root.pendingFolder = ""
-        root.pendingTitle = ""
         root.statusLine = ""
+        if (root.panelOpen) root.refreshRecent()
       } else {
         root.statusLine = last || "Action failed"
       }
-    })
+    })) {
+      root.acting = false
+      root.actingId = ""
+      root.statusLine = "Action failed"
+    }
   }
 
   function setDefaultAction(name) {
@@ -923,12 +899,6 @@ BarWidget {
     running: !watcher.running
     repeat: true
     onTriggered: watcher.running = true
-  }
-
-  Timer {
-    id: latestTimer
-    interval: 1000
-    onTriggered: root.resolveLatest()
   }
 
   Timer {
@@ -1062,6 +1032,29 @@ BarWidget {
     }
   }
 
+  component MarkDot: Text {
+    property bool available: false
+
+    visible: available
+    width: visible ? implicitWidth : 0
+    textFormat: Text.PlainText
+    text: "·"
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.35)
+    font.family: root.faceFont
+    font.pixelSize: Style.font.caption
+  }
+
+  component StatusMark: Text {
+    property bool available: false
+
+    visible: available
+    width: visible ? implicitWidth : 0
+    textFormat: Text.PlainText
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.72)
+    font.family: root.faceFont
+    font.pixelSize: Style.font.caption
+  }
+
   component DocLink: Text {
     id: link
     property string meetingId: ""
@@ -1158,7 +1151,7 @@ BarWidget {
     bar: root.bar
     open: root.opened
     onOpenChanged: if (!open) {
-      root.menuOpen = false
+      root.actionMenuId = ""
       root.briefMenuId = ""
     }
     centerOnBar: false
@@ -1481,168 +1474,6 @@ BarWidget {
           }
         }
 
-        Column {
-          width: parent.width
-          spacing: Style.space(8)
-          visible: root.pending && root.ready
-
-          PanelSeparator { foreground: root.foreground }
-
-          PanelSectionHeader {
-            text: "Actions"
-            foreground: root.foreground
-            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          }
-
-          Text {
-            width: parent.width
-            visible: root.pendingTitle !== ""
-            textFormat: Text.PlainText
-            text: root.pendingTitle
-            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.72)
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-          }
-
-          Column {
-            id: actionSplit
-            width: parent.width
-            spacing: Style.space(4)
-            visible: root.actions.length > 0
-
-            Item {
-              width: parent.width
-              implicitHeight: defaultActionButton.implicitHeight
-
-              Button {
-                id: defaultActionButton
-                anchors.left: parent.left
-                anchors.right: menuKey.left
-                anchors.rightMargin: Style.space(6)
-                leftAlign: true
-                text: root.defaultAction
-                foreground: root.foreground
-                fontFamily: root.faceFont
-                enabled: !root.acting && !root.starting
-                onClicked: root.runAction(root.defaultAction)
-              }
-
-              Button {
-                id: menuKey
-                anchors.right: parent.right
-                width: Style.space(36)
-                iconText: "󰅀"
-                iconRotation: root.menuOpen ? 180 : 0
-                foreground: root.foreground
-                fontFamily: root.faceFont
-                enabled: !root.acting && !root.starting
-                onClicked: root.menuOpen = !root.menuOpen
-              }
-            }
-
-            Rectangle {
-              width: parent.width
-              visible: root.menuOpen
-              implicitHeight: menuColumn.implicitHeight + Style.space(8)
-              radius: 4
-              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
-              border.width: 1
-              border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.28)
-
-              Column {
-                id: menuColumn
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: Style.space(4)
-                spacing: Style.space(2)
-
-                Repeater {
-                  model: root.actions
-
-                  delegate: Item {
-                    required property string modelData
-                    width: parent.width
-                    height: Style.space(32)
-
-                    readonly property bool isDefault: modelData === root.defaultAction
-
-                    Rectangle {
-                      anchors.fill: parent
-                      radius: 3
-                      color: isDefault
-                             ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
-                             : "transparent"
-                    }
-
-                    Text {
-                      anchors.left: parent.left
-                      anchors.right: defaultMark.left
-                      anchors.verticalCenter: parent.verticalCenter
-                      anchors.leftMargin: Style.space(8)
-                      anchors.rightMargin: Style.space(8)
-                      textFormat: Text.PlainText
-                      text: modelData
-                      color: root.foreground
-                      font.family: root.faceFont
-                      font.pixelSize: Style.font.body
-                      elide: Text.ElideRight
-                    }
-
-                    Text {
-                      id: defaultMark
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      anchors.rightMargin: Style.space(8)
-                      textFormat: Text.PlainText
-                      text: isDefault ? "Default" : "Set default"
-                      color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, isDefault ? 1 : 0.62)
-                      font.family: root.faceFont
-                      font.pixelSize: Style.font.caption
-                      font.bold: true
-                    }
-
-                    MouseArea {
-                      anchors.left: parent.left
-                      anchors.right: defaultMark.left
-                      anchors.top: parent.top
-                      anchors.bottom: parent.bottom
-                      enabled: !root.acting && !root.starting
-                      onClicked: {
-                        root.menuOpen = false
-                        root.runAction(modelData)
-                      }
-                    }
-
-                    MouseArea {
-                      anchors.left: defaultMark.left
-                      anchors.right: parent.right
-                      anchors.top: parent.top
-                      anchors.bottom: parent.bottom
-                      anchors.leftMargin: -Style.space(6)
-                      onClicked: {
-                        if (!isDefault) root.setDefaultAction(modelData)
-                        root.menuOpen = false
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-
-          Text {
-            width: parent.width
-            visible: root.actions.length === 0
-            wrapMode: Text.WordWrap
-            textFormat: Text.PlainText
-            text: "No actions in the Meeting Recorder config."
-            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.72)
-            font.family: root.faceFont
-            font.pixelSize: Style.font.body
-          }
-          }
         }
 
         Column {
@@ -1680,11 +1511,21 @@ BarWidget {
             model: root.recentMeetings
 
             delegate: Column {
+              id: historyRow
               required property var modelData
               required property int index
               width: historyFace.width
               spacing: Style.space(8)
 
+              readonly property bool hasPlay: modelData.recording === true
+              readonly property bool showRecorded: hasPlay && modelData.transcribed !== true
+              readonly property bool showTranscribed: modelData.transcribed === true && modelData.transcript !== true
+              readonly property bool showTranscript: modelData.transcript === true
+              readonly property bool showInsights: modelData.insights === true
+              readonly property bool showSave: modelData.transcribed === true
+                                            && !(modelData.transcript === true && modelData.insights === true)
+                                            && root.actions.length > 0
+              readonly property bool saving: root.actingId === modelData.id
               readonly property string dayLabel: {
                 var day = modelData.day || ""
                 if (index === 0) return day
@@ -1752,39 +1593,167 @@ BarWidget {
 
                     PlayLink {
                       meetingId: modelData.id
-                      available: modelData.recording === true
+                      available: historyRow.hasPlay
                     }
 
-                    Text {
-                      visible: modelData.recording === true && (modelData.transcript === true || modelData.insights === true)
-                      textFormat: Text.PlainText
-                      text: "·"
-                      color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.35)
-                      font.family: root.faceFont
-                      font.pixelSize: Style.font.caption
+                    MarkDot { available: historyRow.hasPlay && (historyRow.showRecorded || historyRow.showTranscribed || historyRow.showTranscript || historyRow.showInsights || historyRow.showSave) }
+
+                    StatusMark {
+                      available: historyRow.showRecorded
+                      text: "Recorded"
                     }
+
+                    MarkDot { available: historyRow.showRecorded && (historyRow.showTranscribed || historyRow.showTranscript || historyRow.showInsights || historyRow.showSave) }
+
+                    StatusMark {
+                      available: historyRow.showTranscribed
+                      text: "Transcribed"
+                    }
+
+                    MarkDot { available: historyRow.showTranscribed && (historyRow.showTranscript || historyRow.showInsights || historyRow.showSave) }
 
                     DocLink {
                       meetingId: modelData.id
                       kind: "transcript"
-                      available: modelData.transcript === true
+                      available: historyRow.showTranscript
                       text: "Transcript"
                     }
 
-                    Text {
-                      visible: modelData.transcript === true && modelData.insights === true
-                      textFormat: Text.PlainText
-                      text: "·"
-                      color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.35)
-                      font.family: root.faceFont
-                      font.pixelSize: Style.font.caption
-                    }
+                    MarkDot { available: historyRow.showTranscript && (historyRow.showInsights || historyRow.showSave) }
 
                     DocLink {
                       meetingId: modelData.id
                       kind: "insights"
-                      available: modelData.insights === true
+                      available: historyRow.showInsights
                       text: "Insights"
+                    }
+
+                    MarkDot { available: historyRow.showInsights && historyRow.showSave }
+
+                    Text {
+                      visible: historyRow.showSave
+                      width: visible ? implicitWidth : 0
+                      textFormat: Text.PlainText
+                      text: historyRow.saving ? "Saving…" : "Save"
+                      color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, saveArea.pressed ? 1 : 0.78)
+                      font.family: root.faceFont
+                      font.pixelSize: Style.font.caption
+                      font.underline: saveArea.containsMouse && !root.acting
+                      opacity: root.acting && !historyRow.saving ? 0.4 : 1
+
+                      MouseArea {
+                        id: saveArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        enabled: !root.acting
+                        cursorShape: enabled && containsMouse ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: root.runAction(root.defaultAction, historyRow.modelData.id)
+                      }
+                    }
+
+                    Button {
+                      visible: historyRow.showSave
+                      width: visible ? implicitWidth : 0
+                      iconText: "󰅀"
+                      iconRotation: root.actionMenuId === historyRow.modelData.id ? 180 : 0
+                      iconSize: Style.font.caption
+                      fontSize: Style.font.caption
+                      horizontalPadding: Style.space(2)
+                      verticalPadding: 0
+                      foreground: root.foreground
+                      fontFamily: root.faceFont
+                      enabled: !root.acting
+                      onClicked: root.actionMenuId = root.actionMenuId === historyRow.modelData.id ? "" : historyRow.modelData.id
+                    }
+                  }
+
+                  Rectangle {
+                    width: parent.width
+                    visible: root.actionMenuId === historyRow.modelData.id && historyRow.showSave
+                    implicitHeight: visible ? actionMenu.implicitHeight + Style.space(8) : 0
+                    radius: 4
+                    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+                    border.width: 1
+                    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.28)
+
+                    Column {
+                      id: actionMenu
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.top: parent.top
+                      anchors.margins: Style.space(4)
+                      spacing: Style.space(2)
+
+                      Repeater {
+                        model: root.actions
+
+                        delegate: Item {
+                          required property string modelData
+                          width: parent.width
+                          height: Style.space(32)
+
+                          readonly property bool isDefault: modelData === root.defaultAction
+
+                          Rectangle {
+                            anchors.fill: parent
+                            radius: 3
+                            color: isDefault
+                                   ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+                                   : "transparent"
+                          }
+
+                          Text {
+                            anchors.left: parent.left
+                            anchors.right: defaultMark.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: Style.space(8)
+                            anchors.rightMargin: Style.space(8)
+                            textFormat: Text.PlainText
+                            text: modelData
+                            color: root.foreground
+                            font.family: root.faceFont
+                            font.pixelSize: Style.font.body
+                            elide: Text.ElideRight
+                          }
+
+                          Text {
+                            id: defaultMark
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.rightMargin: Style.space(8)
+                            textFormat: Text.PlainText
+                            text: isDefault ? "Default" : "Set default"
+                            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, isDefault ? 1 : 0.62)
+                            font.family: root.faceFont
+                            font.pixelSize: Style.font.caption
+                            font.bold: true
+                          }
+
+                          MouseArea {
+                            anchors.left: parent.left
+                            anchors.right: defaultMark.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            enabled: !root.acting
+                            onClicked: {
+                              root.actionMenuId = ""
+                              root.runAction(modelData, root.actionMenuId)
+                            }
+                          }
+
+                          MouseArea {
+                            anchors.left: defaultMark.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.leftMargin: -Style.space(6)
+                            onClicked: {
+                              if (!isDefault) root.setDefaultAction(modelData)
+                              root.actionMenuId = ""
+                            }
+                          }
+                        }
+                      }
                     }
                   }
 

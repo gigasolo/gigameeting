@@ -7,7 +7,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-Tomorrow's meetings, briefs that cite the source note, and a list that stays up while a recording or a prep is running. Version stays 1.1.0 until the next release.
+Tomorrow's meetings, briefs that cite the source note, and a list that stays up while a recording or a prep is running. A finished take leaves Today, and History shows whether the notes are in Obsidian. Version stays 1.1.0 until the next release.
 
 ### Added
 
@@ -21,6 +21,7 @@ Tomorrow's meetings, briefs that cite the source note, and a list that stays up 
 - Later, Tomorrow, and History stay up during a recording, a transcription, a prep, and an action.
 - Record and Join also start while the previous meeting is still being transcribed. They do not start a second recording over one that is already going.
 - The vault is the one Obsidian has open. If none is open, it is `~/Documents/Obsidian`.
+- Today no longer keeps Save to Obsidian up after a take finishes. History says Recorded or Transcribed until the notes are in the vault, and Save stays on that row until both the transcript and the insights note are filed.
 
 ## [1.1.0] — 2026-10-04
 

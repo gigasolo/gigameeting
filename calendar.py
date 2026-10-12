@@ -6,8 +6,10 @@ clock times. The join link, invite text, and people stay in a private cache
 for Prep. If HEY cannot be reached, `day` falls back to OmaCal for those two
 days. That spare list has no Prep.
 
-`recent` lists recording folders. The card gets a title, a date, and which
-documents exist. Paths stay here. `audio` prints one recording path for the
+`recent` lists recording folders. The card gets a title, a date, and whether
+the transcript is still local or already a vault note. Paths stay here.
+`folder` prints one meeting path for Save, and only when that transcript
+stays inside the meetings folder. `audio` prints one recording path for the
 card to play, and only if that file stays inside the meetings folder.
 `open-recent` opens the transcript or the insights note the same way, and
 returns without waiting for the app that shows it.
@@ -1172,9 +1174,10 @@ def describe_meeting(folder: Path) -> dict | None:
     sidecar = read_json(folder / ".obsidian-filed.json")
     manifest = manifest_of(folder)
     recording = recording_file(folder) is not None
-    transcript = bool(note_link(sidecar.get("transcript_rel"))) or contained_file(folder, "transcript.md") is not None
+    transcribed = contained_file(folder, "transcript.md") is not None
+    transcript = bool(note_link(sidecar.get("transcript_rel")))
     insights = bool(note_link(sidecar.get("insights_rel")))
-    if not recording and not transcript and not insights:
+    if not recording and not transcribed and not transcript and not insights:
         return None
     stamp = started_stamp(folder, manifest, sidecar)
     moment = datetime.fromtimestamp(stamp).astimezone()
@@ -1184,6 +1187,7 @@ def describe_meeting(folder: Path) -> dict | None:
         "day": when_label(stamp),
         "time": moment.strftime("%H:%M"),
         "recording": recording,
+        "transcribed": transcribed,
         "transcript": transcript,
         "insights": insights,
         "stamp": stamp,
@@ -1216,7 +1220,7 @@ def cmd_recent() -> None:
         if row is not None:
             rows.append(row)
     rows.sort(key=lambda row: row["stamp"], reverse=True)
-    card = [{key: row[key] for key in ("id", "title", "day", "time", "recording", "transcript", "insights")} for row in rows[:MAX_RECENT]]
+    card = [{key: row[key] for key in ("id", "title", "day", "time", "recording", "transcribed", "transcript", "insights")} for row in rows[:MAX_RECENT]]
     print(json.dumps({"meetings": card}, ensure_ascii=False))
 
 
@@ -1245,6 +1249,13 @@ def launch(target: str) -> bool:
     except subprocess.TimeoutExpired:
         return True
     return code == 0
+
+
+def cmd_folder(meeting_id: str) -> None:
+    folder = meeting_folder(meeting_id)
+    if folder is None or contained_file(folder, "transcript.md") is None:
+        fail("missing meeting folder")
+    print(folder)
 
 
 def cmd_audio(meeting_id: str) -> None:
@@ -1306,9 +1317,11 @@ def main(argv: list[str]) -> None:
         cmd_open_recent(argv[2], argv[3])
     elif command == "audio" and len(argv) == 3:
         cmd_audio(argv[2])
+    elif command == "folder" and len(argv) == 3:
+        cmd_folder(argv[2])
     else:
         print(
-            "Usage: calendar.py day|agenda|open-event <id>|prep <id>|open-note <url>|recent|open-recent <id> <kind>|audio <id>",
+            "Usage: calendar.py day|agenda|open-event <id>|prep <id>|open-note <url>|recent|open-recent <id> <kind>|audio <id>|folder <id>",
             file=sys.stderr,
         )
         raise SystemExit(2)
