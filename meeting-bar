@@ -266,8 +266,73 @@ cmd_run_meeting() {
   cmd_run "$name" "$folder"
 }
 
+cmd_callers() {
+  # One app name, or nothing. CALLERS_DUMP=1 reads a pw-dump JSON document
+  # on stdin so tests do not touch the session graph.
+  python3 -c '
+import json, os, subprocess, sys
+
+def load():
+    if os.environ.get("CALLERS_DUMP"):
+        raw = sys.stdin.read()
+    else:
+        raw = subprocess.check_output(["pw-dump"])
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+def props(obj):
+    return (obj.get("info") or {}).get("props") or {}
+
+def skipped(name):
+    return name == "omavoice" or name.startswith("omavoice.")
+
+def label(p, name):
+    return p.get("application.name") or name
+
+data = load()
+play = set()
+rec = set()
+for obj in data:
+    if not str(obj.get("type") or "").endswith("Node"):
+        continue
+    p = props(obj)
+    name = p.get("node.name") or ""
+    if skipped(name):
+        continue
+    cid = p.get("client.id")
+    if cid is None:
+        continue
+    klass = p.get("media.class") or ""
+    if klass.startswith("Stream/Output/Audio"):
+        play.add(cid)
+    elif klass.startswith("Stream/Input/Audio"):
+        rec.add(cid)
+both = play & rec
+
+for obj in data:
+    if not str(obj.get("type") or "").endswith("Node"):
+        continue
+    p = props(obj)
+    name = p.get("node.name") or ""
+    if skipped(name):
+        continue
+    klass = p.get("media.class") or ""
+    cid = p.get("client.id")
+    playback = klass.startswith("Stream/Output/Audio")
+    capture = klass.startswith("Stream/Input/Audio")
+    in_call = (cid in both and (playback or capture)) or (playback and p.get("media.role") == "Communication")
+    if in_call:
+        sys.stdout.write(label(p, name) + "\n")
+        raise SystemExit(0)
+raise SystemExit(0)
+'
+}
+
 usage() {
-  echo "Usage: meeting-bar start [title]|pause|stop|open <url>|day|agenda|open-event <id>|prep <id>|open-note <url>|recent|open-recent <id> <kind>|audio <id>|actions|latest [title]|run <name> <folder>|run-meeting <name> <id>" >&2
+  echo "Usage: meeting-bar start [title]|pause|stop|open <url>|day|agenda|open-event <id>|prep <id>|open-note <url>|recent|open-recent <id> <kind>|audio <id>|actions|latest [title]|run <name> <folder>|run-meeting <name> <id>|callers" >&2
   return 2
 }
 
@@ -288,5 +353,6 @@ case ${1:-} in
   latest) cmd_latest "${2:-}" ;;
   run) cmd_run "${2:-}" "${3:-}" ;;
   run-meeting) cmd_run_meeting "${2:-}" "${3:-}" ;;
+  callers) cmd_callers ;;
   *) usage ;;
 esac

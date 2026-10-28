@@ -7,10 +7,14 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-Tomorrow's meetings, briefs that cite the source note, and a list that stays up while a recording or a prep is running. A finished take leaves Today, and History shows whether the notes are in Obsidian. Version stays 1.1.0 until the next release.
+## [1.2.0] — 2026-10-27
+
+Tomorrow's meetings, briefs that cite the source note, and a list that stays up while a recording or a prep is running. A finished take leaves Today, and History shows whether the notes are in Obsidian.
 
 ### Added
 
+- `omarchy-shell gigasolo.gigameeting toggle` opens and closes the card. It cannot start a recording.
+- With the card open and no meeting in the join window, a status line names an app that is in a call. Closing the card stops the poll. The line does not start a recording.
 - Tomorrow's timed meetings, under Tomorrow. The lookup stops there.
 - A brief cites a sentence or two and links the insight or transcript. Earlier prep notes are not sources. A join link is not a description.
 - When a brief exists, Brief replaces Prep and opens the note. The chevron preps again: the old note is removed, personal notes under My notes stay, and Brief shows Preparing while it runs. Closing the card leaves Preparing in place. Other meetings can be prepped at the same time.

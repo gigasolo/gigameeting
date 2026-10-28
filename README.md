@@ -12,7 +12,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/omarchy-bar-0ea5e9?style=flat-square" alt="Omarchy bar">
-  <img src="https://img.shields.io/badge/version-1.1.0-111827?style=flat-square" alt="Version 1.1.0">
+  <img src="https://img.shields.io/badge/version-1.2.0-111827?style=flat-square" alt="Version 1.2.0">
 </p>
 
 GigaMeeting is a bar card. It does not record, and it does not transcribe.
@@ -51,6 +51,16 @@ less ~/.config/omarchy/plugins/gigasolo.gigameeting/README.md
 omarchy plugin enable gigasolo.gigameeting --section right
 ```
 
+An agent on this machine can install the card. Paste this prompt:
+
+```
+Install the GigaMeeting bar card from this checkout.
+Meeting Recorder must already be installed (`yay -S omarchy-meeting-recorder`). Do not install it if that package is missing; stop and say so.
+Ask before any command that needs root.
+Run `omarchy plugin add "$PWD"` and leave it disabled until README.md has been read.
+When you finish, run `python3 tests/test_schedule.py`, `python3 tests/test_callers.py`, and `bash tests/qml.test.sh`, and show the output.
+```
+
 ## The card
 
 Click the icon to open the card. Click it again to close. The icon never starts a recording.
@@ -65,10 +75,26 @@ Click the icon to open the card. Click it again to close. The icon never starts 
 | **Pause** | Holds the take. Resume continues it. |
 | **Stop** | Saves the recording and transcribes it. |
 | **The action** | Save lives on the History row once a transcript exists and the notes are not both in Obsidian yet. Nothing runs by itself. Today does not keep the last meeting's action up after the recorder is done. |
+| **Key** | `omarchy-shell gigasolo.gigameeting toggle` opens and closes the card. It does not start a recording. |
+| **In a call** | With the card open and no meeting in the join window, a status line names an app that is in a call. It does not start a recording. |
 
 Actions are read from `~/.config/omarchy-meeting-recorder/config.toml` each time the card needs them. Meeting Recorder has no action editor. Change the file, and the next open picks it up.
 
 The default action is remembered in `~/.local/state/omarchy/gigameeting-default-action`.
+
+To open the card from a key, add this to `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + ALT + G", "GigaMeeting", { ipc = "gigasolo.gigameeting.toggle" })
+```
+
+## With preamp
+
+Meeting Recorder captures `@DEFAULT_SOURCE@` and `@DEFAULT_MONITOR@`. With [preamp](https://github.com/bjarneo/preamp) installed, the monitor is the `preamp` sink: the dry app mix, before EQ and room. Apps keep playing into that sink when preamp moves to a headset, so the computer-audio track still follows the call.
+
+Leave preamp's room off during a recorded call. The recorder drops mic audio that only speaks while the computer track speaks. A room tail is a smeared copy of that dry monitor, and that test gets worse.
+
+The card still does not record by itself.
 
 ## File the notes
 
@@ -102,9 +128,17 @@ Removal leaves the default-action file in place. Delete `~/.local/state/omarchy/
 sudo pacman -R omarchy-meeting-recorder-bin
 ```
 
+## Develop
+
+```sh
+python3 tests/test_schedule.py
+python3 tests/test_callers.py
+bash tests/qml.test.sh
+```
+
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md). Tomorrow, source links in a brief, keeping the list up while recording, and filing status on History are unreleased. The manifest version stays 1.1.0 until the next release.
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## Marketplace
 

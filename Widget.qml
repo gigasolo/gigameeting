@@ -24,6 +24,14 @@ import qs.Ui
 BarWidget {
   id: root
   moduleName: "gigasolo.gigameeting"
+  ipcTarget: "gigasolo.gigameeting"
+
+  IpcHandler {
+    target: root.ipcTarget
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function toggle(): void { root.toggle() }
+  }
 
   readonly property int maxTitleLength: 200
   readonly property string helper: {
@@ -112,7 +120,10 @@ BarWidget {
     if (root.showingHistory) root.briefMenuId = ""
     else root.actionMenuId = ""
     if (root.showingHistory && root.panelOpen) root.refreshRecent()
+    root.clearCallHint()
   }
+  onOfferTitleChanged: root.clearCallHint()
+  onRecorderStateChanged: root.clearCallHint()
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property color recordColor: Color.urgent
   property bool panelOpen: false
@@ -213,6 +224,28 @@ BarWidget {
     root.refreshRecent()
   }
 
+  function isCallHint(line) {
+    return String(line || "").slice(-13) === " is in a call"
+  }
+
+  function clearCallHint() {
+    var quiet = root.recorderState === "off" || root.recorderState === "idle" || root.recorderState === "done"
+    var showing = root.panelOpen && !root.showingHistory && root.offerTitle === "" && quiet
+    if (!showing && root.isCallHint(root.statusLine)) root.statusLine = ""
+  }
+
+  function applyCallers(text) {
+    var name = String(text || "").trim().split("\n")[0]
+    var hint = name ? name + " is in a call" : ""
+    var quiet = root.recorderState === "off" || root.recorderState === "idle" || root.recorderState === "done"
+    var showing = root.panelOpen && !root.showingHistory && root.offerTitle === "" && quiet
+    if (!showing) {
+      root.clearCallHint()
+      return
+    }
+    if (root.statusLine === "" || root.isCallHint(root.statusLine)) root.statusLine = hint
+  }
+
   function close() {
     root.stopClip()
     root.recentSerial += 1
@@ -239,6 +272,7 @@ BarWidget {
     root.briefUrl = ""
     root.briefMenuId = ""
     root.actionMenuId = ""
+    root.clearCallHint()
   }
 
   function toggleBriefMenu(id) {
@@ -899,6 +933,24 @@ BarWidget {
     running: !watcher.running
     repeat: true
     onTriggered: watcher.running = true
+  }
+
+  Timer {
+    id: callersTimer
+    interval: 10000
+    repeat: true
+    triggeredOnStart: true
+    running: root.panelOpen && !root.showingHistory && root.offerTitle === ""
+             && (root.recorderState === "off" || root.recorderState === "idle" || root.recorderState === "done")
+    onTriggered: if (!callersProc.running) callersProc.running = true
+  }
+
+  Process {
+    id: callersProc
+    command: [root.helper, "callers"]
+    stdout: StdioCollector {
+      onStreamFinished: root.applyCallers(text)
+    }
   }
 
   Timer {
