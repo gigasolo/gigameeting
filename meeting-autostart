@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""Start Meeting Recorder when a timed calendar event begins.
+
+    meeting-autostart [--dry-run [--now ISO]]
+
+A systemd user timer runs this once a minute. It reads today's events the
+way the card does (HEY first, omacal as the spare, all-day events skipped).
+An event fires once, from its start time until two minutes later, and only
+when nothing is recording. Firing starts Meeting Recorder under the event's
+title, then files the recording with `meeting-manage both` after the
+recorder says it is done. The tick returns at once; both jobs run detached.
+
+`--dry-run` prints the events seen, the decision for each, and the commands
+it would run. It starts nothing and writes nothing.
+
+Not here: stopping on silence, a skip list, or any change to the card.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import select
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+RECORDER = os.environ.get("GIGAMEETING_RECORDER", "omarchy-meeting-recorder")
+MANAGE = os.path.expanduser(os.environ.get("GIGAMEETING_MANAGE", "~/.local/bin/meeting-manage"))
+FIRED = Path(
+    os.path.expanduser(
+        os.environ.get(
+            "GIGAMEETING_AUTOSTART_STATE",
+            "~/.local/state/omarchy/gigameeting-autostart.json",
+        )
+    )
+)
+CACHE = Path(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+) / "omarchy-meeting-recorder"
+
+GRACE_MS = 2 * 60 * 1000
+KEEP_MS = 2 * 24 * 60 * 60 * 1000
+WAIT_LIMIT = "12h"
+
+# The recorder states the card knows (meeting-bar one_state).
+KNOWN_STATES = {"off", "idle", "recording", "paused", "stopping", "transcribing", "done"}
+# States in which a take is going or being closed. Never start over one.
+TAKING = {"recording", "paused"}
+HOLD = {"stopping"}
+
+
+def load_calendar():
+    """Load calendar.py under another name; its own name shadows the stdlib."""
+    spec = importlib.util.spec_from_file_location("gigameeting_calendar", HERE / "calendar.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_events(cal, now_ms: float) -> tuple[str, list[dict]]:
+    """Today's timed events and where they came from. Same order as the card."""
+    today = datetime.fromtimestamp(now_ms / 1000).astimezone().date().isoformat()
+    rows = cal.hey_rows(today)
+    if rows is not None:
+        return "hey", cal.normalize_hey(rows, now_ms, today)
+    return "omacal", cal.omacal_events(now_ms)
+
+
+def event_key(event: dict) -> str:
+    """One id per event and start. omacal rows have no id, so the title stands in."""
+    ident = str(event.get("id") or "") or str(event.get("title") or "")
+    return f"{ident}@{int(event['start'])}"
+
+
+def decide(event: dict, now_ms: float, fired: dict, state: str) -> str:
+    """fire | not-yet | late | already-fired | recording | busy"""
+    start = event["start"]
+    if now_ms < start:
+        return "not-yet"
+    if now_ms - start > GRACE_MS:
+        return "late"
+    if event_key(event) in fired:
+        return "already-fired"
+    if state in TAKING:
+        return "recording"
+    if state in HOLD:
+        return "busy"
+    return "fire"
+
+
+def safe_title(title: str) -> str:
+    """A name for `start`. A leading dash would read as a flag in recorder 1.8.0."""
+    name = " ".join(str(title).split()).lstrip("-").strip()
+    return name or "Meeting"
+
+
+def start_command(title: str) -> list[str]:
+    # Positional name: 1.5.0 has no --name flag, and 1.8.0 joins plain words into the name.
+    return [RECORDER, "start", safe_title(title)]
+
+
+def wait_script() -> str:
+    """Wait for the recording to finish, then file the folder `wait` prints."""
+    return (
+        f'folder=$(timeout {WAIT_LIMIT} {shlex.quote(RECORDER)} wait) || exit 0; '
+        f'[ -n "$folder" ] && exec {shlex.quote(MANAGE)} both "$folder"'
+    )
+
+
+def wait_command() -> list[str]:
+    return ["bash", "-c", wait_script()]
+
+
+def supports_wait() -> bool:
+    """Recorder 1.5.0 has no `wait`. Read its --help; do not guess from the version."""
+    try:
+        out = subprocess.run([RECORDER, "--help"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return any(line.split()[:1] == ["wait"] for line in out.stdout.splitlines())
+
+
+def unfinished_recording() -> bool:
+    """A take left on disk: the card opens the recorder to recover it instead of starting."""
+    try:
+        for folder in CACHE.iterdir():
+            for name in ("mic.raw", "system.raw"):
+                try:
+                    if (folder / name).stat().st_size > 0:
+                        return True
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return False
+
+
+def recorder_state() -> str:
+    """The first line of `watch`, the same read the card makes. unknown if unreadable."""
+    try:
+        proc = subprocess.Popen(
+            [RECORDER, "watch"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        )
+    except OSError:
+        return "unknown"
+    try:
+        timer = time.monotonic() + 3
+        line = ""
+        # watch prints a line at once, even when the app is off.
+        while time.monotonic() < timer:
+            ready, _, _ = select.select([proc.stdout], [], [], 0.2)
+            if ready:
+                line = proc.stdout.readline()
+                break
+    finally:
+        proc.kill()
+        proc.wait()
+    try:
+        state = json.loads(line).get("state")
+    except (json.JSONDecodeError, AttributeError):
+        return "unknown"
+    return state if state in KNOWN_STATES else "unknown"
+
+
+def read_fired() -> dict:
+    try:
+        data = json.loads(FIRED.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def prune(fired: dict, now_ms: float) -> dict:
+    """Drop entries older than two days, and anything that is not an entry."""
+    return {
+        key: value
+        for key, value in fired.items()
+        if isinstance(value, dict)
+        and isinstance(value.get("start"), (int, float))
+        and now_ms - value["start"] <= KEEP_MS
+    }
+
+
+def save_fired(fired: dict) -> None:
+    FIRED.parent.mkdir(parents=True, exist_ok=True)
+    temporary = FIRED.with_suffix(".json.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(fired, ensure_ascii=False, indent=1).encode())
+    finally:
+        os.close(fd)
+    os.replace(temporary, FIRED)
+
+
+def detach(argv: list[str], unit: str) -> None:
+    """Run argv beyond this tick. A oneshot unit kills its cgroup when it ends, so
+    under systemd the job gets its own transient unit; elsewhere setsid is enough."""
+    if shutil.which("systemd-run") and os.environ.get("INVOCATION_ID"):
+        launch = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", "--", *argv]
+    else:
+        launch = ["setsid", "-f", *argv]
+    subprocess.run(
+        launch,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def run_tick(
+    now_ms: float,
+    events: list[dict],
+    state: str,
+    fired: dict,
+    *,
+    can_wait: bool,
+    recovery: bool,
+    launch=detach,
+    say=print,
+) -> tuple[dict, list[tuple[str, str, str]]]:
+    """Decide for every event. Returns the new fired list and (key, title, decision) rows."""
+    rows = []
+    fired = dict(fired)
+    for event in events:
+        verdict = decide(event, now_ms, fired, state)
+        key = event_key(event)
+        if verdict == "fire" and state == "off" and recovery:
+            verdict = "recovery"
+        rows.append((key, event["title"], verdict))
+        if verdict == "recording":
+            # Already taking this meeting, or a long one. A Stop must not start another.
+            fired[key] = {"start": event["start"], "title": event["title"], "result": "recording"}
+        elif verdict == "fire":
+            fired[key] = {"start": event["start"], "title": event["title"], "result": "started"}
+            stamp = f"{int(event['start'])}"
+            launch(start_command(event["title"]), f"gigameeting-autostart-start-{stamp}")
+            if can_wait:
+                launch(wait_command(), f"gigameeting-autostart-file-{stamp}")
+            else:
+                say("recorder has no `wait`: the recording will not be filed by itself")
+    return fired, rows
+
+
+def parse_now(value: str) -> float:
+    when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if when.tzinfo is None:
+        when = when.astimezone()
+    return when.timestamp() * 1000
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    dry = "--dry-run" in args
+    now_ms = time.time() * 1000
+    if "--now" in args:
+        index = args.index("--now")
+        if not dry or index + 1 >= len(args):
+            print("usage: meeting-autostart [--dry-run [--now ISO]]", file=sys.stderr)
+            return 2
+        try:
+            now_ms = parse_now(args[index + 1])
+        except ValueError:
+            print("--now needs an ISO time, like 2026-11-11T10:00:00-08:00", file=sys.stderr)
+            return 2
+        del args[index : index + 2]
+    if [a for a in args if a != "--dry-run"]:
+        print("usage: meeting-autostart [--dry-run [--now ISO]]", file=sys.stderr)
+        return 2
+
+    cal = load_calendar()
+    source, events = read_events(cal, now_ms)
+    state = recorder_state()
+    stored = read_fired()
+    fired = prune(stored, now_ms)
+    can_wait = supports_wait()
+    recovery = unfinished_recording()
+
+    shown = datetime.fromtimestamp(now_ms / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    if dry:
+        print(f"meeting-autostart dry run at {shown}")
+        print(f"calendar: {source}, {len(events)} timed event(s)")
+        print(f"recorder state: {state}; `wait` supported: {'yes' if can_wait else 'no'}")
+        print(f"fired list: {len(fired)} entr{'y' if len(fired) == 1 else 'ies'} ({FIRED})")
+        launched: list[str] = []
+
+        def show(argv: list[str], unit: str) -> None:
+            launched.append(f"  would run ({unit}): {shlex.join(argv)}")
+
+        _, rows = run_tick(
+            now_ms, events, state, fired, can_wait=can_wait, recovery=recovery, launch=show,
+            say=lambda text: launched.append(f"  note: {text}"),
+        )
+        for event, (key, title, verdict) in zip(events, rows):
+            start = datetime.fromtimestamp(event["start"] / 1000).astimezone().strftime("%H:%M")
+            print(f"- {start} {title!r} [{key}]: {verdict}")
+        for line in launched:
+            print(line)
+        if not events:
+            print("no timed events today: nothing to do")
+        print("dry run: nothing started, nothing written")
+        return 0
+
+    if state == "unknown":
+        print("recorder state unreadable: skipping this tick")
+        return 0
+    new_fired, rows = run_tick(
+        now_ms, events, state, fired, can_wait=can_wait, recovery=recovery, say=print
+    )
+    for key, title, verdict in rows:
+        if verdict in ("fire", "recording", "busy", "recovery"):
+            print(f"{title!r} [{key}]: {verdict}")
+    if new_fired != stored:
+        save_fired(new_fired)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

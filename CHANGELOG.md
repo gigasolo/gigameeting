@@ -7,6 +7,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+
+- `meeting-autostart` starts Meeting Recorder when a timed calendar event begins, once per event, within two minutes of its start, and files the recording when the recorder is done. It is off until the systemd user timer in `systemd/` is installed. Filing needs Meeting Recorder 1.6.0 or newer. `--dry-run` shows what it would do.
+
 ## [1.2.0] — 2026-10-27
 
 Tomorrow's meetings, briefs that cite the source note, and a list that stays up while a recording or a prep is running. A finished take leaves Today, and History shows whether the notes are in Obsidian.

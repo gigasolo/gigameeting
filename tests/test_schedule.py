@@ -19,7 +19,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-CALENDAR = Path("/home/lonbaker/code/gigameeting/calendar.py")
+CALENDAR = Path(__file__).resolve().parents[1] / "calendar.py"
 
 
 def stamp(moment: datetime) -> str:
