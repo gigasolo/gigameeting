@@ -1,0 +1,6 @@
+[Unit]
+Description=GigaMeeting: start Meeting Recorder when a calendar event begins
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/omarchy/plugins/gigasolo.gigameeting/meeting-autostart

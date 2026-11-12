@@ -1,0 +1,10 @@
+[Unit]
+Description=GigaMeeting: check the calendar every minute
+
+[Timer]
+OnCalendar=*:*:00
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

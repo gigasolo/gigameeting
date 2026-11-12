@@ -88,6 +88,43 @@ To open the card from a key, add this to `~/.config/hypr/bindings.lua`:
 o.bind("SUPER + ALT + G", "GigaMeeting", { ipc = "gigasolo.gigameeting.toggle" })
 ```
 
+## Start recordings from the calendar
+
+`meeting-autostart` starts Meeting Recorder when a timed event on your calendar begins. A systemd user timer runs it once a minute. It reads today's events the way the card does: HEY first, `omacal` as the spare, all-day events skipped. An event starts one recording, named after the event, from its start time until two minutes later. If you stop that recording, it is not started again. Nothing starts while a recording is going, paused, or being closed, or while an unfinished take is waiting to be recovered. When the recorder is done, the recording is filed with `meeting-manage both`, so link `meeting-manage` first (see File the notes). This is off until you install the timer.
+
+Install:
+
+```sh
+mkdir -p ~/.config/systemd/user
+ln -sf ~/.config/omarchy/plugins/gigasolo.gigameeting/systemd/gigameeting-autostart.service ~/.config/systemd/user/
+ln -sf ~/.config/omarchy/plugins/gigasolo.gigameeting/systemd/gigameeting-autostart.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now gigameeting-autostart.timer
+```
+
+Uninstall:
+
+```sh
+systemctl --user disable --now gigameeting-autostart.timer
+rm ~/.config/systemd/user/gigameeting-autostart.service ~/.config/systemd/user/gigameeting-autostart.timer
+systemctl --user daemon-reload
+```
+
+To see what it would do, without starting or writing anything:
+
+```sh
+~/.config/omarchy/plugins/gigasolo.gigameeting/meeting-autostart --dry-run
+~/.config/omarchy/plugins/gigasolo.gigameeting/meeting-autostart --dry-run --now 2026-11-11T10:00:00-08:00
+```
+
+The first form uses the current time. `--now ISO` asks about another moment. Both print the events seen, the decision for each, and the commands that would run.
+
+It needs Meeting Recorder 1.6.0 or newer, for the `wait` command. With 1.5.0 the recording still starts, but it is not filed by itself. Run Save on the History row instead.
+
+Left out: it does not stop a recording on silence, there is no skip list, and the card is unchanged.
+
+The events it has started are remembered in `~/.local/state/omarchy/gigameeting-autostart.json`.
+
 ## With preamp
 
 Meeting Recorder captures `@DEFAULT_SOURCE@` and `@DEFAULT_MONITOR@`. With [preamp](https://github.com/bjarneo/preamp) installed, the monitor is the `preamp` sink: the dry app mix, before EQ and room. Apps keep playing into that sink when preamp moves to a headset, so the computer-audio track still follows the call.
@@ -134,6 +171,7 @@ sudo pacman -R omarchy-meeting-recorder-bin
 python3 tests/test_schedule.py
 python3 tests/test_callers.py
 bash tests/qml.test.sh
+python3 tests/test_autostart.py
 ```
 
 ## Changelog
